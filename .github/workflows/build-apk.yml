@@ -30,6 +30,7 @@ jobs:
             openjdk-17-jdk \
             autoconf \
             libtool \
+            libltdl-dev \
             pkg-config \
             zlib1g-dev \
             libncurses-dev \
@@ -39,7 +40,8 @@ jobs:
             libffi-dev \
             libssl-dev \
             automake \
-            lld
+            lld \
+            ccache
 
       - name: Install Buildozer and dependencies
         run: |
