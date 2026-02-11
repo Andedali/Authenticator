@@ -1,0 +1,18 @@
+#python staff
+venv/
+.venv/
+.pylintrc
+__pycache__/
+
+#ide staff
+.vscode
+.idea
+
+#django staff
+db.sqlite3
+media/
+
+#settings staff
+services.json
+.env
+.env.local
