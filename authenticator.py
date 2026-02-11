@@ -11,7 +11,7 @@ import struct
 import socket
 import threading
 import pyotp
-import pyperclip
+from kivy.core.clipboard import Clipboard
 from pathlib import Path
 
 from kivy.clock import Clock
@@ -39,7 +39,9 @@ from kivy.uix.modalview import ModalView
 from kivy.animation import Animation
 
 # ── Window size for desktop testing (ignored on mobile) ──────────────
-Window.size = (400, 720)
+from kivy.utils import platform
+if platform not in ("android", "ios"):
+    Window.size = (400, 720)
 
 
 def toast(text, duration=2.5):
@@ -467,7 +469,7 @@ class ServiceCard(MDCard):
         """Copy current TOTP code to clipboard."""
         try:
             code = self.totp_code.replace(" ", "")
-            pyperclip.copy(code)
+            Clipboard.copy(code)
             toast(f"Код скопирован: {self.totp_code}")
         except Exception:
             pass
