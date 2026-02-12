@@ -47,6 +47,36 @@ from kivy.utils import platform
 if platform not in ("android", "ios"):
     Window.size = (400, 720)
 
+# ── Override bubble menu style via KV (no Python monkey-patching) ─────
+from kivy.lang import Builder
+Builder.load_string('''
+<-TextInputCutCopyPaste>:
+    content: content.__self__
+    but_cut: cut.__self__
+    but_copy: copy.__self__
+    but_paste: paste.__self__
+    but_selectall: selectall.__self__
+    size_hint: None, None
+    size: '250sp', '50sp'
+    BubbleContent:
+        id: content
+        BubbleButton:
+            id: cut
+            text: 'Вырезать'
+            on_release: root.do('cut')
+        BubbleButton:
+            id: copy
+            text: 'Копировать'
+            on_release: root.do('copy')
+        BubbleButton:
+            id: paste
+            text: 'Вставить'
+            on_release: root.do('paste')
+        BubbleButton:
+            id: selectall
+            text: 'Выбрать всё'
+            on_release: root.do('selectall')
+''')
 
 
 def toast(text, duration=2.5):
