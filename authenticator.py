@@ -50,9 +50,17 @@ if platform not in ("android", "ios"):
 
 # ── Patch: translate & style TextInput bubble menu ───────────────────
 def _patch_bubble_menu():
-    """Translate to Russian, white style, position above field."""
+    """Translate to Russian, white style, position above field.
+
+    Also fixes the Kivy bug where the paste bubble disappears on touch_up
+    because cursor_pos changes (due to layout / keyboard / scroll adjustments)
+    trigger the hide callback immediately after the bubble is shown.
+    """
+    import time as _time
     from kivy.uix.textinput import TextInput, TextInputCutCopyPaste
     from kivy.uix.bubble import BubbleButton
+    from kivy.base import EventLoop
+    from kivy.clock import Clock
 
     _LABELS = {
         "Select All": "Выбрать всё",
@@ -73,6 +81,10 @@ def _patch_bubble_menu():
 
     def _patched_on_parent(self, instance, value):
         _orig_on_parent(self, instance, value)
+
+        # Only style when bubble is added to a parent, not on removal
+        if value is None:
+            return
 
         # White background via image (no canvas hacks)
         self.background_image = _white_img
@@ -109,31 +121,30 @@ def _patch_bubble_menu():
 
     TextInputCutCopyPaste.on_parent = _patched_on_parent
 
-    # -- 2. Position bubble above the text field --
+    # -- 2. Position bubble above the field & stamp show-time --
     _orig_show = TextInput._show_cut_copy_paste
 
     def _patched_show(self, pos, win, parent_changed=False, mode='',
                       pos_in_window=False, *l):
-        # Call original to create/show bubble normally
         _orig_show(self, pos, win, parent_changed, mode, pos_in_window, *l)
 
         bubble = self._bubble
         if bubble is None or parent_changed:
             return
 
+        # Stamp the time so the cooldown in _hide can protect the bubble
+        bubble._show_time = _time.monotonic()
+
         # Reposition: center horizontally above the field
         t_pos = self.to_window(pos[0], pos[1]) if not pos_in_window else pos
         bw = bubble.size[0]
 
-        # X: centered on touch, clamped to window
         bx = t_pos[0] - bw / 2
         bx = max(dp(4), min(bx, win.width - bw - dp(4)))
 
-        # Y: above the field top edge
         field_top_y = self.to_window(0, self.top)[1]
         by = field_top_y + dp(8)
         if by + bubble.height > win.height:
-            # If no room above, place below field
             field_bottom_y = self.to_window(0, self.y)[1]
             by = field_bottom_y - bubble.height - dp(8)
 
@@ -143,6 +154,57 @@ def _patch_bubble_menu():
         bubble.arrow_pos = "bottom_mid"
 
     TextInput._show_cut_copy_paste = _patched_show
+
+    # -- 3. Cooldown: don't hide bubble within 0.6 s of showing ----------
+    #    This prevents cursor_pos / scroll changes during touch_up from
+    #    instantly killing the paste bubble.  Focus-loss hides are still
+    #    allowed immediately.
+    _orig_hide = TextInput._hide_cut_copy_paste
+
+    def _patched_hide(self, win=None):
+        bubble = getattr(self, '_bubble', None)
+        if bubble and self.focus:
+            show_t = getattr(bubble, '_show_time', 0)
+            if _time.monotonic() - show_t < 0.6:
+                return                       # too soon, keep it
+        return _orig_hide(self, win)
+
+    TextInput._hide_cut_copy_paste = _patched_hide
+
+    # -- 4. Re-show paste bubble after touch_up if it was just killed -----
+    _orig_touch_up = TextInput.on_touch_up
+
+    def _patched_touch_up(self, touch):
+        if touch.grab_current is not self:
+            return _orig_touch_up(self, touch)
+
+        bubble = getattr(self, '_bubble', None)
+        was_paste = (
+            bubble is not None
+            and bubble.parent is not None
+            and getattr(bubble, 'mode', '') == 'paste'
+        )
+
+        result = _orig_touch_up(self, touch)
+
+        # If the paste bubble was visible but just got hidden, re-show it
+        if was_paste and self.focus:
+            bubble = self._bubble
+            if bubble is not None and bubble.parent is None:
+                td = getattr(self, '_touch_down', None)
+                pos = (
+                    self.to_local(*td.pos, relative=False)
+                    if td else self.cursor_pos
+                )
+                Clock.schedule_once(
+                    lambda dt: self._show_cut_copy_paste(
+                        pos, EventLoop.window, mode='paste')
+                    if self.focus else None,
+                    0
+                )
+        return result
+
+    TextInput.on_touch_up = _patched_touch_up
 
 _patch_bubble_menu()
 
