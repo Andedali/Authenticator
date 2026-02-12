@@ -61,34 +61,30 @@ def _patch_bubble_menu():
         "Paste": "Вставить",
     }
 
+    # Create a 4x4 white PNG for bubble background
+    import tempfile
+    from PIL import Image as PILImage
+    _white_img = os.path.join(tempfile.gettempdir(), '_kivy_white_bg.png')
+    if not os.path.exists(_white_img):
+        PILImage.new('RGBA', (4, 4), (245, 245, 245, 255)).save(_white_img)
+
     # -- 1. Translate, style buttons, resize bubble --
     _orig_on_parent = TextInputCutCopyPaste.on_parent
 
     def _patched_on_parent(self, instance, value):
         _orig_on_parent(self, instance, value)
 
-        # Kill ALL default backgrounds (bubble + content + arrow)
-        self.background_image = ""
-        self.background_color = (0, 0, 0, 0)
-        self.arrow_image = ""
-        self.show_arrow = False
-        self.border = [0, 0, 0, 0]
-        # BubbleContent also has its own dark background
-        if hasattr(self, 'content') and self.content:
-            self.content.background_image = ""
-            self.content.background_color = (0, 0, 0, 0)
-            self.content.border = [0, 0, 0, 0]
+        # White background via image (no canvas hacks)
+        self.background_image = _white_img
+        self.background_color = (1, 1, 1, 1)
+        self.arrow_image = _white_img
+        self.border = [2, 2, 2, 2]
 
-        # Draw clean white rounded rect
-        from kivy.graphics import Color, RoundedRectangle
-        if not hasattr(self, '_custom_bg'):
-            self._custom_bg = True
-            with self.canvas.before:
-                self._bg_color = Color(0.97, 0.97, 0.97, 1)
-                self._bg_rect = RoundedRectangle(
-                    pos=self.pos, size=self.size, radius=[dp(8)])
-            self.bind(pos=lambda *a: setattr(self._bg_rect, 'pos', self.pos))
-            self.bind(size=lambda *a: setattr(self._bg_rect, 'size', self.size))
+        # White content background too
+        if hasattr(self, 'content') and self.content:
+            self.content.background_image = _white_img
+            self.content.background_color = (1, 1, 1, 1)
+            self.content.border = [2, 2, 2, 2]
 
         # Style and translate each button
         visible_buttons = []
@@ -97,7 +93,7 @@ def _patch_bubble_menu():
             if btn:
                 if btn.text in _LABELS:
                     btn.text = _LABELS[btn.text]
-                btn.color = (0.1, 0.1, 0.1, 1)  # black text
+                btn.color = (0.1, 0.1, 0.1, 1)
                 btn.background_normal = ""
                 btn.background_color = (0, 0, 0, 0)
                 btn.font_size = dp(14)
