@@ -80,6 +80,32 @@ Builder.load_string('''
             on_release: root.do('selectall')
 ''')
 
+# ── Position bubble above the text field (safe: only moves the widget) ──
+from kivy.uix.textinput import TextInput
+_orig_show_ccp = TextInput._show_cut_copy_paste
+
+def _positioned_show_ccp(self, pos, win, parent_changed=False, mode='',
+                         pos_in_window=False, *l):
+    _orig_show_ccp(self, pos, win, parent_changed, mode, pos_in_window, *l)
+    bubble = self._bubble
+    if bubble is None or parent_changed:
+        return
+    t_pos = self.to_window(pos[0], pos[1]) if not pos_in_window else pos
+    bw = bubble.size[0]
+    bx = t_pos[0] - bw / 2
+    bx = max(dp(4), min(bx, win.width - bw - dp(4)))
+    field_top_y = self.to_window(0, self.top)[1]
+    by = field_top_y + dp(8)
+    if by + bubble.height > win.height:
+        field_bottom_y = self.to_window(0, self.y)[1]
+        by = field_bottom_y - bubble.height - dp(8)
+    bubble_pos = self.to_widget(bx, by, relative=True)
+    bubble.center_x = bubble_pos[0] + bw / 2
+    bubble.y = bubble_pos[1]
+    bubble.arrow_pos = 'bottom_mid'
+
+TextInput._show_cut_copy_paste = _positioned_show_ccp
+
 
 def toast(text, duration=2.5):
     """Custom toast with text wrapping support. Fade in/out, no slide."""
