@@ -96,6 +96,50 @@ jobs:
       - name: Setup Android SDK
         uses: android-actions/setup-android@v3
 
+      - name: Create test script
+        run: |
+          cat > test_apk.sh << 'SCRIPT'
+          #!/bin/bash
+          set -e
+          echo "=== Emulator booted ==="
+
+          APK_FILE=$(find apk/ -name "*.apk" | head -1)
+          echo "Installing APK: $APK_FILE"
+
+          if [ -z "$APK_FILE" ]; then
+            echo "ERROR: No APK found!"
+            ls -la apk/
+            exit 1
+          fi
+
+          adb install "$APK_FILE"
+
+          adb logcat -c
+          adb logcat -v time > logcat_full.txt &
+          LOGCAT_PID=$!
+
+          echo "=== Launching app ==="
+          adb shell am start -n org.andedali.authenticator/org.kivy.android.PythonActivity
+
+          echo "=== Waiting 60s for app to start ==="
+          sleep 60
+
+          echo "=== Checking app status ==="
+          adb shell pidof org.andedali.authenticator || echo "APP CRASHED - process not found"
+
+          adb shell screencap -p /sdcard/screenshot.png
+          adb pull /sdcard/screenshot.png screenshot.png || echo "Failed to pull screenshot"
+
+          kill $LOGCAT_PID 2>/dev/null || true
+          sleep 2
+
+          grep -iE "(python|kivy|authenticator|exception|error|traceback|crash)" logcat_full.txt > logcat_python.txt || true
+          echo "=== Python logs ==="
+          cat logcat_python.txt
+          echo "=== Done ==="
+          SCRIPT
+          chmod +x test_apk.sh
+
       - name: Run emulator and capture logcat
         uses: reactivecircus/android-emulator-runner@v2
         with:
@@ -104,47 +148,7 @@ jobs:
           profile: pixel_5
           emulator-options: -no-window -gpu swiftshader_indirect -no-snapshot -noaudio -no-boot-anim
           disable-animations: true
-          script: |
-            echo "=== Emulator booted ==="
-
-            # Find the APK file
-            APK_FILE=$(find apk/ -name "*.apk" | head -1)
-            echo "Installing APK: $APK_FILE"
-
-            # Install the APK
-            adb install "$APK_FILE"
-
-            # Clear logcat and start capturing
-            adb logcat -c
-            adb logcat -v time > logcat_full.txt &
-            LOGCAT_PID=$!
-
-            # Launch the app
-            echo "=== Launching app ==="
-            adb shell am start -n org.andedali.authenticator/org.kivy.android.PythonActivity
-
-            # Wait for the app to run (60 seconds should be enough)
-            echo "=== Waiting 60s for app to start and run ==="
-            sleep 60
-
-            # Check if app is still running
-            echo "=== Checking app status ==="
-            adb shell pidof org.andedali.authenticator || echo "APP CRASHED - process not found"
-
-            # Capture a screenshot
-            adb shell screencap -p /sdcard/screenshot.png
-            adb pull /sdcard/screenshot.png screenshot.png || echo "Failed to pull screenshot"
-
-            # Stop logcat
-            kill $LOGCAT_PID 2>/dev/null || true
-            sleep 2
-
-            # Extract Python-related logs
-            echo "=== Python logs ==="
-            grep -iE "(python|kivy|authenticator|exception|error|traceback|crash)" logcat_full.txt > logcat_python.txt || true
-            cat logcat_python.txt
-
-            echo "=== Done ==="
+          script: bash test_apk.sh
 
       - name: Upload logcat logs
         if: always()
