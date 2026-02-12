@@ -56,6 +56,11 @@ jobs:
           restore-keys: |
             buildozer-${{ runner.os }}-
 
+      - name: Set JAVA_HOME to Java 17
+        run: |
+          export JAVA_HOME=$JAVA_HOME_17_X64
+          echo "JAVA_HOME=$JAVA_HOME_17_X64" >> $GITHUB_ENV
+
       - name: Build APK with Buildozer
         run: |
           buildozer -v android debug
