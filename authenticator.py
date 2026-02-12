@@ -14,6 +14,10 @@ import pyotp
 from kivy.core.clipboard import Clipboard
 from pathlib import Path
 
+# Disable multitouch emulation (red dots on right/middle click)
+from kivy.config import Config
+Config.set('input', 'mouse', 'mouse,multitouch_on_demand')
+
 from kivy.clock import Clock
 from kivy.core.window import Window
 from kivy.metrics import dp
@@ -63,17 +67,23 @@ def _patch_bubble_menu():
     def _patched_on_parent(self, instance, value):
         _orig_on_parent(self, instance, value)
 
-        # Use blank white image as bubble background
+        # Kill ALL default backgrounds (bubble + content + arrow)
         self.background_image = ""
-        self.background_color = (1, 1, 1, 0)
+        self.background_color = (0, 0, 0, 0)
         self.arrow_image = ""
         self.show_arrow = False
+        self.border = [0, 0, 0, 0]
+        # BubbleContent also has its own dark background
+        if hasattr(self, 'content') and self.content:
+            self.content.background_image = ""
+            self.content.background_color = (0, 0, 0, 0)
+            self.content.border = [0, 0, 0, 0]
 
-        # Draw white rounded rect via canvas (after transforms, safe)
+        # Draw clean white rounded rect
         from kivy.graphics import Color, RoundedRectangle
         if not hasattr(self, '_custom_bg'):
             self._custom_bg = True
-            with self.canvas:
+            with self.canvas.before:
                 self._bg_color = Color(0.97, 0.97, 0.97, 1)
                 self._bg_rect = RoundedRectangle(
                     pos=self.pos, size=self.size, radius=[dp(8)])
