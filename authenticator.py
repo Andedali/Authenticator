@@ -57,26 +57,49 @@ def _patch_bubble_menu():
         "Paste": "Вставить",
     }
 
-    # -- 1. Translate and style buttons when bubble is shown --
+    # -- 1. Translate, style buttons, resize bubble --
     _orig_on_parent = TextInputCutCopyPaste.on_parent
 
     def _patched_on_parent(self, instance, value):
         _orig_on_parent(self, instance, value)
 
-        # White bubble background
-        self.background_color = (1, 1, 1, 1)
-        self.border = [16, 16, 16, 16]
+        # Use blank white image as bubble background
+        self.background_image = ""
+        self.background_color = (1, 1, 1, 0)
+        self.arrow_image = ""
+        self.show_arrow = False
+
+        # Draw white rounded rect via canvas (after transforms, safe)
+        from kivy.graphics import Color, RoundedRectangle
+        if not hasattr(self, '_custom_bg'):
+            self._custom_bg = True
+            with self.canvas:
+                self._bg_color = Color(0.97, 0.97, 0.97, 1)
+                self._bg_rect = RoundedRectangle(
+                    pos=self.pos, size=self.size, radius=[dp(8)])
+            self.bind(pos=lambda *a: setattr(self._bg_rect, 'pos', self.pos))
+            self.bind(size=lambda *a: setattr(self._bg_rect, 'size', self.size))
 
         # Style and translate each button
+        visible_buttons = []
         for btn_attr in ('but_cut', 'but_copy', 'but_paste', 'but_selectall'):
             btn = getattr(self, btn_attr, None)
             if btn:
                 if btn.text in _LABELS:
                     btn.text = _LABELS[btn.text]
-                btn.color = (0.15, 0.15, 0.15, 1)  # dark text on white bg
+                btn.color = (0.1, 0.1, 0.1, 1)  # black text
                 btn.background_normal = ""
                 btn.background_color = (0, 0, 0, 0)
                 btn.font_size = dp(14)
+                btn.size_hint_x = None
+                btn.width = max(dp(90), len(btn.text) * dp(12))
+                if btn.parent:
+                    visible_buttons.append(btn)
+
+        # Resize bubble to fit all buttons
+        if visible_buttons:
+            total_w = sum(b.width for b in visible_buttons) + dp(12)
+            self.size = (total_w, dp(48))
 
     TextInputCutCopyPaste.on_parent = _patched_on_parent
 
