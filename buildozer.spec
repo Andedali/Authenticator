@@ -15,6 +15,9 @@ source.dir = .
 # (list) Source files to include (let empty to include all the files)
 source.include_exts = py,png,jpg,kv,atlas,json
 
+# (list) Source files to exclude (let empty to not exclude anything)
+source.exclude_dirs = .git,.github,.venv,__pycache__,bin
+
 # (str) Application versioning
 version = 1.0.0
 
@@ -64,6 +67,12 @@ android.archs = arm64-v8a
 
 # (str) presplash color
 android.presplash_color = #1a1a2e
+
+# (bool) Allow backup of app data
+android.allow_backup = True
+
+# (str) Android logcat filters to use
+android.logcat_filters = *:S python:D
 
 # (str) Icon of the application
 #icon.filename = %(source.dir)s/icon.png

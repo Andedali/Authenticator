@@ -101,25 +101,49 @@ def toast(text, duration=2.5):
     Clock.schedule_once(_fade_out, duration)
 
 # ── Data file path ───────────────────────────────────────────────────
-DATA_DIR = Path(os.path.dirname(os.path.abspath(__file__)))
-DATA_FILE = DATA_DIR / "services.json"
+# Will be set properly in AuthenticatorApp.build() for Android support
+_data_file = None
 
 
-def load_services() -> list:
+def _get_data_file():
+    """Get the data file path, with Android-safe fallback."""
+    global _data_file
+    if _data_file is not None:
+        return _data_file
+    # Fallback for desktop
+    _data_file = Path(os.path.dirname(os.path.abspath(__file__))) / "services.json"
+    return _data_file
+
+
+def set_data_dir(directory):
+    """Set data directory (called from App.build with user_data_dir on Android)."""
+    global _data_file
+    d = Path(directory)
+    d.mkdir(parents=True, exist_ok=True)
+    _data_file = d / "services.json"
+
+
+def load_services():
     """Load services list from JSON file."""
-    if DATA_FILE.exists():
+    data_file = _get_data_file()
+    if data_file.exists():
         try:
-            with open(DATA_FILE, "r", encoding="utf-8") as f:
+            with open(data_file, "r", encoding="utf-8") as f:
                 return json.load(f)
         except (json.JSONDecodeError, IOError):
             return []
     return []
 
 
-def save_services(services: list):
+def save_services(services):
     """Save services list to JSON file."""
-    with open(DATA_FILE, "w", encoding="utf-8") as f:
-        json.dump(services, f, ensure_ascii=False, indent=2)
+    data_file = _get_data_file()
+    try:
+        data_file.parent.mkdir(parents=True, exist_ok=True)
+        with open(data_file, "w", encoding="utf-8") as f:
+            json.dump(services, f, ensure_ascii=False, indent=2)
+    except Exception as e:
+        print(f"[Authenticator] Error saving services: {e}")
 
 
 def check_ntp_offset(callback, timeout=5):
@@ -613,14 +637,18 @@ class AuthenticatorApp(MDApp):
 
     def __init__(self, **kwargs):
         super().__init__(**kwargs)
-        self.services: list = []
-        self.sm: MDScreenManager | None = None
+        self.services = []
+        self.sm = None
         self._update_event = None
-        self._cards: list[ServiceCard] = []
+        self._cards = []
         self._ntp_dialog = None
-        self._time_offset: float = 0.0  # offset in seconds vs NTP
+        self._time_offset = 0.0  # offset in seconds vs NTP
 
     def build(self):
+        # Set data directory (Android-safe: uses app private storage)
+        set_data_dir(self.user_data_dir)
+        print(f"[Authenticator] Data dir: {self.user_data_dir}")
+
         # Theme configuration
         self.theme_cls.theme_style = "Dark"
         self.theme_cls.primary_palette = "Teal"
