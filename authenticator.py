@@ -52,11 +52,13 @@ if platform not in ("android", "ios"):
 def _patch_bubble_menu():
     """Translate to Russian, white style, position above field.
 
-    Also fixes the Kivy bug where the paste bubble disappears on touch_up
-    because cursor_pos changes (due to layout / keyboard / scroll adjustments)
-    trigger the hide callback immediately after the bubble is shown.
+    Uses only safe, non-invasive patches:
+      1. on_parent   – visual styling (colors, translation, sizing)
+      2. _show_cut_copy_paste – reposition above the field
+      3. long_touch  – deferred re-show so the bubble survives touch_up
+    Does NOT touch on_touch_up or _hide_cut_copy_paste to avoid breaking
+    basic TextInput focus behaviour.
     """
-    import time as _time
     from kivy.uix.textinput import TextInput, TextInputCutCopyPaste
     from kivy.uix.bubble import BubbleButton
     from kivy.base import EventLoop
@@ -121,7 +123,7 @@ def _patch_bubble_menu():
 
     TextInputCutCopyPaste.on_parent = _patched_on_parent
 
-    # -- 2. Position bubble above the field & stamp show-time --
+    # -- 2. Position bubble above the field --
     _orig_show = TextInput._show_cut_copy_paste
 
     def _patched_show(self, pos, win, parent_changed=False, mode='',
@@ -131,9 +133,6 @@ def _patch_bubble_menu():
         bubble = self._bubble
         if bubble is None or parent_changed:
             return
-
-        # Stamp the time so the cooldown in _hide can protect the bubble
-        bubble._show_time = _time.monotonic()
 
         # Reposition: center horizontally above the field
         t_pos = self.to_window(pos[0], pos[1]) if not pos_in_window else pos
@@ -155,62 +154,40 @@ def _patch_bubble_menu():
 
     TextInput._show_cut_copy_paste = _patched_show
 
-    # -- 3. Cooldown: don't hide bubble within 0.6 s of showing ----------
-    #    This prevents cursor_pos / scroll changes during touch_up from
-    #    instantly killing the paste bubble.  Focus-loss hides are still
-    #    allowed immediately.
-    _orig_hide = TextInput._hide_cut_copy_paste
+    # -- 3. Re-show paste bubble after touch_up settles -------------------
+    #    long_touch shows the bubble, but the subsequent touch_up hides it
+    #    (cursor_pos / scroll changes trigger the Kivy hide-callback).
+    #    We schedule a deferred re-show: by the time it fires, the touch_up
+    #    turbulence is over and the bubble can safely reappear.
+    _orig_long_touch = TextInput.long_touch
 
-    def _patched_hide(self, win=None):
+    def _patched_long_touch(self, dt):
+        _orig_long_touch(self, dt)
+
+        # Only act if the bubble was actually shown
         bubble = getattr(self, '_bubble', None)
-        if bubble and self.focus:
-            show_t = getattr(bubble, '_show_time', 0)
-            if _time.monotonic() - show_t < 0.6:
-                return                       # too soon, keep it
-        return _orig_hide(self, win)
+        if bubble is None or bubble.parent is None:
+            return
 
-    TextInput._hide_cut_copy_paste = _patched_hide
+        td = getattr(self, '_touch_down', None)
 
-    # -- 4. Re-show paste bubble & preserve focus after touch_up ----------
-    _orig_touch_up = TextInput.on_touch_up
+        def _deferred_reshow(dt2, ti=self, touch_down=td):
+            if not ti.focus:
+                return
+            # Bubble was hidden by touch_up – re-show it
+            b = getattr(ti, '_bubble', None)
+            if b is None or b.parent is not None:
+                return                         # still visible, nothing to do
+            pos = (
+                ti.to_local(*touch_down.pos, relative=False)
+                if touch_down else ti.cursor_pos
+            )
+            ti._show_cut_copy_paste(pos, EventLoop.window, mode='paste')
 
-    def _patched_touch_up(self, touch):
-        if touch.grab_current is not self:
-            return _orig_touch_up(self, touch)
+        # 0.35 s is enough for the touch_up + hide animation (.225 s) to finish
+        Clock.schedule_once(_deferred_reshow, 0.35)
 
-        bubble = getattr(self, '_bubble', None)
-        was_paste = (
-            bubble is not None
-            and bubble.parent is not None
-            and getattr(bubble, 'mode', '') == 'paste'
-        )
-        had_focus = self.focus
-
-        result = _orig_touch_up(self, touch)
-
-        # Safeguard: if we had focus + paste bubble and lost focus during
-        # touch_up (Android keyboard / layout quirks), forcibly restore it
-        if was_paste and had_focus and not self.focus:
-            self.focus = True
-
-        # If the paste bubble was visible but just got hidden, re-show it
-        if was_paste and self.focus:
-            bubble = self._bubble
-            if bubble is not None and bubble.parent is None:
-                td = getattr(self, '_touch_down', None)
-                pos = (
-                    self.to_local(*td.pos, relative=False)
-                    if td else self.cursor_pos
-                )
-                # Check focus again inside the callback (next frame)
-                def _deferred_reshow(dt, ti=self, p=pos):
-                    if ti.focus:
-                        ti._show_cut_copy_paste(
-                            p, EventLoop.window, mode='paste')
-                Clock.schedule_once(_deferred_reshow, 0)
-        return result
-
-    TextInput.on_touch_up = _patched_touch_up
+    TextInput.long_touch = _patched_long_touch
 
 _patch_bubble_menu()
 
