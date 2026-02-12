@@ -44,10 +44,11 @@ if platform not in ("android", "ios"):
     Window.size = (400, 720)
 
 
-# ── Patch: translate TextInput bubble menu to Russian ────────────────
-def _patch_bubble_russian():
-    """Translate cut/copy/paste bubble buttons to Russian."""
-    from kivy.uix.textinput import TextInputCutCopyPaste
+# ── Patch: translate & style TextInput bubble menu ───────────────────
+def _patch_bubble_menu():
+    """Translate to Russian, white style, position above field."""
+    from kivy.uix.textinput import TextInput, TextInputCutCopyPaste
+    from kivy.uix.bubble import BubbleButton
 
     _LABELS = {
         "Select All": "Выбрать всё",
@@ -56,19 +57,65 @@ def _patch_bubble_russian():
         "Paste": "Вставить",
     }
 
+    # -- 1. Translate and style buttons when bubble is shown --
     _orig_on_parent = TextInputCutCopyPaste.on_parent
 
     def _patched_on_parent(self, instance, value):
         _orig_on_parent(self, instance, value)
-        # Translate button labels after they are added to content
+
+        # White bubble background
+        self.background_color = (1, 1, 1, 1)
+        self.border = [16, 16, 16, 16]
+
+        # Style and translate each button
         for btn_attr in ('but_cut', 'but_copy', 'but_paste', 'but_selectall'):
             btn = getattr(self, btn_attr, None)
-            if btn and btn.text in _LABELS:
-                btn.text = _LABELS[btn.text]
+            if btn:
+                if btn.text in _LABELS:
+                    btn.text = _LABELS[btn.text]
+                btn.color = (0.15, 0.15, 0.15, 1)  # dark text on white bg
+                btn.background_normal = ""
+                btn.background_color = (0, 0, 0, 0)
+                btn.font_size = dp(14)
 
     TextInputCutCopyPaste.on_parent = _patched_on_parent
 
-_patch_bubble_russian()
+    # -- 2. Position bubble above the text field --
+    _orig_show = TextInput._show_cut_copy_paste
+
+    def _patched_show(self, pos, win, parent_changed=False, mode='',
+                      pos_in_window=False, *l):
+        # Call original to create/show bubble normally
+        _orig_show(self, pos, win, parent_changed, mode, pos_in_window, *l)
+
+        bubble = self._bubble
+        if bubble is None or parent_changed:
+            return
+
+        # Reposition: center horizontally above the field
+        t_pos = self.to_window(pos[0], pos[1]) if not pos_in_window else pos
+        bw = bubble.size[0]
+
+        # X: centered on touch, clamped to window
+        bx = t_pos[0] - bw / 2
+        bx = max(dp(4), min(bx, win.width - bw - dp(4)))
+
+        # Y: above the field top edge
+        field_top_y = self.to_window(0, self.top)[1]
+        by = field_top_y + dp(8)
+        if by + bubble.height > win.height:
+            # If no room above, place below field
+            field_bottom_y = self.to_window(0, self.y)[1]
+            by = field_bottom_y - bubble.height - dp(8)
+
+        bubble_pos = self.to_widget(bx, by, relative=True)
+        bubble.center_x = bubble_pos[0] + bw / 2
+        bubble.y = bubble_pos[1]
+        bubble.arrow_pos = "bottom_mid"
+
+    TextInput._show_cut_copy_paste = _patched_show
+
+_patch_bubble_menu()
 
 
 
