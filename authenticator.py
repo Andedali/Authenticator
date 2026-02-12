@@ -14,9 +14,11 @@ import pyotp
 from kivy.core.clipboard import Clipboard
 from pathlib import Path
 
-# Disable multitouch emulation (red dots on right/middle click)
+# Disable multitouch emulation (red dots on right/middle click) — desktop only
 from kivy.config import Config
-Config.set('input', 'mouse', 'mouse,multitouch_on_demand')
+from kivy.utils import platform as _plat
+if _plat not in ('android', 'ios'):
+    Config.set('input', 'mouse', 'mouse,multitouch_on_demand')
 
 from kivy.clock import Clock
 from kivy.core.window import Window
