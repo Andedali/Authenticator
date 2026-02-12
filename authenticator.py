@@ -44,6 +44,81 @@ if platform not in ("android", "ios"):
     Window.size = (400, 720)
 
 
+# ── Patch Kivy TextInput bubble menu (Russian, Material style) ───────
+def _patch_textinput_bubble():
+    """Replace default black English bubble with Russian Material-styled menu."""
+    from kivy.uix.textinput import TextInput
+    from kivy.uix.bubble import Bubble, BubbleButton
+    from kivy.graphics import Color, RoundedRectangle
+
+    _LABELS = {
+        "Select All": "Выделить всё",
+        "Cut": "Вырезать",
+        "Copy": "Копировать",
+        "Paste": "Вставить",
+    }
+
+    _original_show = TextInput._show_cut_copy_paste
+
+    def _patched_show(self, pos, win, mode):
+        _original_show(self, pos, win, mode)
+
+        bubble = self._bubble
+        if bubble is None:
+            return
+
+        # Style the bubble
+        bubble.background_color = (0, 0, 0, 0)  # hide default bg
+        bubble.border = [0, 0, 0, 0]
+        bubble.arrow_image = ""
+        bubble.show_arrow = False
+        bubble.padding = [dp(4), dp(4)]
+
+        # Draw custom rounded background
+        bubble.canvas.before.clear()
+        with bubble.canvas.before:
+            Color(0.18, 0.18, 0.22, 0.95)
+            bg = RoundedRectangle(
+                pos=bubble.pos, size=bubble.size, radius=[dp(10)]
+            )
+        bubble.bind(pos=lambda *a: setattr(bg, 'pos', bubble.pos))
+        bubble.bind(size=lambda *a: setattr(bg, 'size', bubble.size))
+
+        # Style buttons and translate
+        for child in bubble.content.children:
+            if isinstance(child, BubbleButton):
+                eng = child.text
+                child.text = _LABELS.get(eng, eng)
+                child.color = (1, 1, 1, 1)
+                child.font_size = dp(14)
+                child.background_color = (0, 0, 0, 0)
+                child.background_normal = ""
+                child.size_hint_x = None
+                child.width = dp(max(len(child.text) * 11, 80))
+
+        # Position above the touch point
+        bubble_width = sum(
+            c.width for c in bubble.content.children
+            if isinstance(c, BubbleButton)
+        ) + dp(16)
+        bubble.size = (bubble_width, dp(44))
+
+        # Place above the text field, centered on touch x
+        bx = pos[0] - bubble_width / 2
+        by = self.to_window(0, self.top)[1] + dp(8)
+
+        # Keep within window bounds
+        bx = max(dp(4), min(bx, win.width - bubble_width - dp(4)))
+        by = min(by, win.height - dp(48))
+
+        bubble.pos = (bx, by)
+        bubble.arrow_pos = "bottom_mid"
+
+    TextInput._show_cut_copy_paste = _patched_show
+
+_patch_textinput_bubble()
+
+
 def toast(text, duration=2.5):
     """Custom toast with text wrapping support. Fade in/out, no slide."""
     from kivy.uix.boxlayout import BoxLayout as _BL
@@ -696,7 +771,7 @@ class AuthenticatorApp(MDApp):
         abs_offset = abs(offset)
 
         if abs_offset > 5:
-            direction = "ahead" if offset > 0 else "behind"
+            direction = "спешат" if offset > 0 else "отстают"
             self._ntp_dialog = MDDialog(
                 title="Clock Out of Sync",
                 text=(
@@ -705,7 +780,7 @@ class AuthenticatorApp(MDApp):
                     f"TOTP коды могут не работать правильно, если смещение "
                     f"превышает 30 секунд.\n\n"
                     f"Пожалуйста, синхронизируйте ваше системное время:\n"
-                    f"Настройки > Время и дата > Синхронизировать сейчас"
+                    f"Настройки > Система > Время и дата > Синхронизировать сейчас"
                 ),
                 buttons=[
                     MDFlatButton(
