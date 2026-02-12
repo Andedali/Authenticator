@@ -171,7 +171,7 @@ def _patch_bubble_menu():
 
     TextInput._hide_cut_copy_paste = _patched_hide
 
-    # -- 4. Re-show paste bubble after touch_up if it was just killed -----
+    # -- 4. Re-show paste bubble & preserve focus after touch_up ----------
     _orig_touch_up = TextInput.on_touch_up
 
     def _patched_touch_up(self, touch):
@@ -184,8 +184,14 @@ def _patch_bubble_menu():
             and bubble.parent is not None
             and getattr(bubble, 'mode', '') == 'paste'
         )
+        had_focus = self.focus
 
         result = _orig_touch_up(self, touch)
+
+        # Safeguard: if we had focus + paste bubble and lost focus during
+        # touch_up (Android keyboard / layout quirks), forcibly restore it
+        if was_paste and had_focus and not self.focus:
+            self.focus = True
 
         # If the paste bubble was visible but just got hidden, re-show it
         if was_paste and self.focus:
@@ -196,12 +202,12 @@ def _patch_bubble_menu():
                     self.to_local(*td.pos, relative=False)
                     if td else self.cursor_pos
                 )
-                Clock.schedule_once(
-                    lambda dt: self._show_cut_copy_paste(
-                        pos, EventLoop.window, mode='paste')
-                    if self.focus else None,
-                    0
-                )
+                # Check focus again inside the callback (next frame)
+                def _deferred_reshow(dt, ti=self, p=pos):
+                    if ti.focus:
+                        ti._show_cut_copy_paste(
+                            p, EventLoop.window, mode='paste')
+                Clock.schedule_once(_deferred_reshow, 0)
         return result
 
     TextInput.on_touch_up = _patched_touch_up
