@@ -44,79 +44,32 @@ if platform not in ("android", "ios"):
     Window.size = (400, 720)
 
 
-# ── Patch Kivy TextInput bubble menu (Russian, Material style) ───────
-def _patch_textinput_bubble():
-    """Replace default black English bubble with Russian Material-styled menu."""
-    from kivy.uix.textinput import TextInput
-    from kivy.uix.bubble import Bubble, BubbleButton
-    from kivy.graphics import Color, RoundedRectangle
+# ── Patch: translate TextInput bubble menu to Russian ────────────────
+def _patch_bubble_russian():
+    """Translate cut/copy/paste bubble buttons to Russian."""
+    from kivy.uix.textinput import TextInputCutCopyPaste
 
     _LABELS = {
-        "Select All": "Выделить всё",
+        "Select All": "Выбрать всё",
         "Cut": "Вырезать",
         "Copy": "Копировать",
         "Paste": "Вставить",
     }
 
-    _original_show = TextInput._show_cut_copy_paste
+    _orig_on_parent = TextInputCutCopyPaste.on_parent
 
-    def _patched_show(self, pos, win, mode):
-        _original_show(self, pos, win, mode)
+    def _patched_on_parent(self, instance, value):
+        _orig_on_parent(self, instance, value)
+        # Translate button labels after they are added to content
+        for btn_attr in ('but_cut', 'but_copy', 'but_paste', 'but_selectall'):
+            btn = getattr(self, btn_attr, None)
+            if btn and btn.text in _LABELS:
+                btn.text = _LABELS[btn.text]
 
-        bubble = self._bubble
-        if bubble is None:
-            return
+    TextInputCutCopyPaste.on_parent = _patched_on_parent
 
-        # Style the bubble
-        bubble.background_color = (0, 0, 0, 0)  # hide default bg
-        bubble.border = [0, 0, 0, 0]
-        bubble.arrow_image = ""
-        bubble.show_arrow = False
-        bubble.padding = [dp(4), dp(4)]
+_patch_bubble_russian()
 
-        # Draw custom rounded background
-        bubble.canvas.before.clear()
-        with bubble.canvas.before:
-            Color(0.18, 0.18, 0.22, 0.95)
-            bg = RoundedRectangle(
-                pos=bubble.pos, size=bubble.size, radius=[dp(10)]
-            )
-        bubble.bind(pos=lambda *a: setattr(bg, 'pos', bubble.pos))
-        bubble.bind(size=lambda *a: setattr(bg, 'size', bubble.size))
-
-        # Style buttons and translate
-        for child in bubble.content.children:
-            if isinstance(child, BubbleButton):
-                eng = child.text
-                child.text = _LABELS.get(eng, eng)
-                child.color = (1, 1, 1, 1)
-                child.font_size = dp(14)
-                child.background_color = (0, 0, 0, 0)
-                child.background_normal = ""
-                child.size_hint_x = None
-                child.width = dp(max(len(child.text) * 11, 80))
-
-        # Position above the touch point
-        bubble_width = sum(
-            c.width for c in bubble.content.children
-            if isinstance(c, BubbleButton)
-        ) + dp(16)
-        bubble.size = (bubble_width, dp(44))
-
-        # Place above the text field, centered on touch x
-        bx = pos[0] - bubble_width / 2
-        by = self.to_window(0, self.top)[1] + dp(8)
-
-        # Keep within window bounds
-        bx = max(dp(4), min(bx, win.width - bubble_width - dp(4)))
-        by = min(by, win.height - dp(48))
-
-        bubble.pos = (bx, by)
-        bubble.arrow_pos = "bottom_mid"
-
-    TextInput._show_cut_copy_paste = _patched_show
-
-_patch_textinput_bubble()
 
 
 def toast(text, duration=2.5):
