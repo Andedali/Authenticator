@@ -49,9 +49,16 @@ from kivy.utils import platform
 if platform not in ("android", "ios"):
     Window.size = (400, 720)
 
+# ── White background image for bubble menu ──
+import tempfile
+from PIL import Image as _PILImage
+_white_bg = os.path.join(tempfile.gettempdir(), '_kivy_white_bg.png').replace('\\', '/')
+if not os.path.exists(_white_bg):
+    _PILImage.new('RGBA', (4, 4), (247, 247, 247, 255)).save(_white_bg)
+
 # ── Override bubble menu style via KV (no Python monkey-patching) ─────
 from kivy.lang import Builder
-Builder.load_string('''
+Builder.load_string(f'''
 <-TextInputCutCopyPaste>:
     content: content.__self__
     but_cut: cut.__self__
@@ -60,24 +67,45 @@ Builder.load_string('''
     but_selectall: selectall.__self__
     size_hint: None, None
     size: '250sp', '50sp'
+    background_image: '{_white_bg}'
+    background_color: 1, 1, 1, 1
+    arrow_image: '{_white_bg}'
     BubbleContent:
         id: content
+        background_image: '{_white_bg}'
+        background_color: 1, 1, 1, 1
         BubbleButton:
             id: cut
             text: 'Вырезать'
             on_release: root.do('cut')
+            background_normal: ''
+            background_down: ''
+            background_color: 0.97, 0.97, 0.97, 1
+            color: 0.1, 0.1, 0.1, 1
         BubbleButton:
             id: copy
             text: 'Копировать'
             on_release: root.do('copy')
+            background_normal: ''
+            background_down: ''
+            background_color: 0.97, 0.97, 0.97, 1
+            color: 0.1, 0.1, 0.1, 1
         BubbleButton:
             id: paste
             text: 'Вставить'
             on_release: root.do('paste')
+            background_normal: ''
+            background_down: ''
+            background_color: 0.97, 0.97, 0.97, 1
+            color: 0.1, 0.1, 0.1, 1
         BubbleButton:
             id: selectall
             text: 'Выбрать всё'
             on_release: root.do('selectall')
+            background_normal: ''
+            background_down: ''
+            background_color: 0.97, 0.97, 0.97, 1
+            color: 0.1, 0.1, 0.1, 1
 ''')
 
 # ── Position bubble above the text field (safe: only moves the widget) ──
