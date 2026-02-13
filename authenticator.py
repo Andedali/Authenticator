@@ -51,6 +51,29 @@ from kivy.utils import platform
 if platform not in ("android", "ios"):
     Window.size = (400, 720)
 
+# ── Locale: Russian if system is Russian, else English ───────────────
+def _is_russian():
+    try:
+        import locale
+        loc = (locale.getlocale() or ("en",))[0] or (locale.getdefaultlocale() or ("en",))[0] or "en"
+        if loc:
+            return loc.split("_")[0].lower() == "ru"
+    except Exception:
+        pass
+    if platform == "android":
+        try:
+            from jnius import autoclass
+            Locale = autoclass("java.util.Locale")
+            return (Locale.getDefault().getLanguage() or "en") == "ru"
+        except Exception:
+            pass
+    return False
+
+
+def t(en: str, ru: str) -> str:
+    """Return Russian string if system locale is Russian, else English."""
+    return ru if _is_russian() else en
+
 # ── White background image for bubble menu ──
 from PIL import Image as _PILImage
 
@@ -92,6 +115,10 @@ if not os.path.exists(_white_bg):
     _PILImage.new('RGBA', (4, 4), (247, 247, 247, 255)).save(_white_bg)
 
 # ── Override bubble menu style via KV (no Python monkey-patching) ─────
+_cut = t("Cut", "Вырезать")
+_copy = t("Copy", "Копировать")
+_paste = t("Paste", "Вставить")
+_selectall = t("Select all", "Выбрать всё")
 from kivy.lang import Builder
 Builder.load_string(f'''
 <-TextInputCutCopyPaste>:
@@ -111,7 +138,7 @@ Builder.load_string(f'''
         background_color: 1, 1, 1, 1
         BubbleButton:
             id: cut
-            text: 'Вырезать'
+            text: '{_cut}'
             on_release: root.do('cut')
             background_normal: ''
             background_down: ''
@@ -119,7 +146,7 @@ Builder.load_string(f'''
             color: 0.1, 0.1, 0.1, 1
         BubbleButton:
             id: copy
-            text: 'Копировать'
+            text: '{_copy}'
             on_release: root.do('copy')
             background_normal: ''
             background_down: ''
@@ -127,7 +154,7 @@ Builder.load_string(f'''
             color: 0.1, 0.1, 0.1, 1
         BubbleButton:
             id: paste
-            text: 'Вставить'
+            text: '{_paste}'
             on_release: root.do('paste')
             background_normal: ''
             background_down: ''
@@ -135,7 +162,7 @@ Builder.load_string(f'''
             color: 0.1, 0.1, 0.1, 1
         BubbleButton:
             id: selectall
-            text: 'Выбрать всё'
+            text: '{_selectall}'
             on_release: root.do('selectall')
             background_normal: ''
             background_down: ''
@@ -325,7 +352,25 @@ def check_ntp_offset(callback, timeout=5):
 
 
 # ── KV Language UI definition ────────────────────────────────────────
-KV = """
+_app_title = t("Authenticator", "Аутентификатор")
+_add_service = t("Add Service", "Добавить сервис")
+_empty_services = t("No services yet.\\nTap + to add the first one.", "Еще нет сервисов.\\nНажмите + чтобы добавить первый сервис.")
+_edit_service = t("Edit Service", "Редактировать сервис")
+_backup_codes = t("Backup Codes", "Резервные коды")
+_hint_title = t("Name *", "Название *")
+_hint_title_help = t("e.g. Google, GitHub, Discord", "например, Google, GitHub, Discord")
+_hint_url = t("Service URL", "URL сервиса")
+_hint_url_help = t("e.g. https://accounts.google.com", "например, https://accounts.google.com")
+_hint_secret = t("Secret Key *", "Секретный ключ *")
+_hint_secret_help = t("Base32-encoded secret from the service", "Base32 закодированный секрет от сервиса")
+_hint_account = t("Account", "Аккаунт")
+_hint_account_help = t("e.g. user@gmail.com", "например, user@gmail.com")
+_hint_backup = t("Backup Codes", "Резервные коды")
+_hint_backup_help = t("Comma-separated backup codes", "Запятая-разделенные резервные коды")
+_btn_save = t("SAVE", "СОХРАНИТЬ")
+_btn_update = t("UPDATE", "ОБНОВИТЬ")
+
+KV = f"""
 #:import Clock kivy.clock.Clock
 
 <ServiceCard>:
@@ -379,7 +424,7 @@ KV = """
             theme_text_color: "Custom"
             text_color: app.theme_cls.primary_color
             on_release: root.copy_code()
-            pos_hint: {"center_y": .5}
+            pos_hint: {{"center_y": .5}}
 
     MDBoxLayout:
         orientation: "horizontal"
@@ -393,7 +438,7 @@ KV = """
             color: app.theme_cls.primary_color
             size_hint_y: None
             height: dp(4)
-            pos_hint: {"center_y": .5}
+            pos_hint: {{"center_y": .5}}
 
         MDLabel:
             id: timer_label
@@ -409,14 +454,14 @@ KV = """
             theme_text_color: "Custom"
             text_color: app.theme_cls.accent_color
             on_release: root.edit_service()
-            pos_hint: {"center_y": .5}
+            pos_hint: {{"center_y": .5}}
 
         MDIconButton:
             icon: "delete"
             theme_text_color: "Custom"
             text_color: [0.9, 0.3, 0.3, 1]
             on_release: root.confirm_delete()
-            pos_hint: {"center_y": .5}
+            pos_hint: {{"center_y": .5}}
 
 
 <MainScreen>:
@@ -426,13 +471,13 @@ KV = """
         orientation: "vertical"
 
         MDTopAppBar:
-            title: "Аутентификатор"
+            title: "{_app_title}"
             anchor_title: "center"
             elevation: 0
             md_bg_color: app.theme_cls.primary_color
             specific_text_color: 1, 1, 1, 1
             left_action_items: [["", lambda x: None]]
-            right_action_items: [["plus", lambda x: root.open_add_screen(), "Добавить сервис"]] if app._is_desktop else [["plus", lambda x: root.open_add_screen()]]
+            right_action_items: [["plus", lambda x: root.open_add_screen(), "{_add_service}"]] if app._is_desktop else [["plus", lambda x: root.open_add_screen()]]
 
         MDScrollView:
             id: scroll_view
@@ -448,7 +493,7 @@ KV = """
 
                 MDLabel:
                     id: empty_label
-                    text: "Еще нет сервисов.\\nНажмите + чтобы добавить первый сервис."
+                    text: "{_empty_services}"
                     halign: "center"
                     theme_text_color: "Hint"
                     font_style: "Subtitle1"
@@ -465,7 +510,7 @@ KV = """
 
         MDTopAppBar:
             id: toolbar
-            title: "Добавить сервис"
+            title: "{_add_service}"
             anchor_title: "center"
             elevation: 0
             md_bg_color: app.theme_cls.primary_color
@@ -485,8 +530,8 @@ KV = """
 
                 MDTextField:
                     id: field_title
-                    hint_text: "Название *"
-                    helper_text: "например, Google, GitHub, Discord"
+                    hint_text: "{_hint_title}"
+                    helper_text: "{_hint_title_help}"
                     helper_text_mode: "on_focus"
                     icon_left: "tag"
                     required: True
@@ -495,8 +540,8 @@ KV = """
 
                 MDTextField:
                     id: field_url
-                    hint_text: "URL сервиса"
-                    helper_text: "например, https://accounts.google.com"
+                    hint_text: "{_hint_url}"
+                    helper_text: "{_hint_url_help}"
                     helper_text_mode: "on_focus"
                     icon_left: "web"
                     size_hint_y: None
@@ -504,8 +549,8 @@ KV = """
 
                 MDTextField:
                     id: field_secret
-                    hint_text: "Секретный ключ *"
-                    helper_text: "Base32 закодированный секрет от сервиса"
+                    hint_text: "{_hint_secret}"
+                    helper_text: "{_hint_secret_help}"
                     helper_text_mode: "on_focus"
                     icon_left: "key"
                     required: True
@@ -514,8 +559,8 @@ KV = """
 
                 MDTextField:
                     id: field_account
-                    hint_text: "Аккаунт"
-                    helper_text: "например, user@gmail.com"
+                    hint_text: "{_hint_account}"
+                    helper_text: "{_hint_account_help}"
                     helper_text_mode: "on_focus"
                     icon_left: "account"
                     size_hint_y: None
@@ -523,8 +568,8 @@ KV = """
 
                 MDTextField:
                     id: field_backup
-                    hint_text: "Резервные коды"
-                    helper_text: "Запятая-разделенные резервные коды"
+                    hint_text: "{_hint_backup}"
+                    helper_text: "{_hint_backup_help}"
                     helper_text_mode: "on_focus"
                     icon_left: "shield-key"
                     multiline: True
@@ -537,9 +582,9 @@ KV = """
 
                 MDRaisedButton:
                     id: save_btn
-                    text: "SAVE"
+                    text: "{_btn_save}"
                     md_bg_color: app.theme_cls.primary_color
-                    pos_hint: {"center_x": .5}
+                    pos_hint: {{"center_x": .5}}
                     size_hint_x: 0.6
                     on_release: root.save_service()
 
@@ -555,7 +600,7 @@ KV = """
         orientation: "vertical"
 
         MDTopAppBar:
-            title: "Резервные коды"
+            title: "{_backup_codes}"
             anchor_title: "center"
             elevation: 0
             md_bg_color: app.theme_cls.primary_color
@@ -620,7 +665,7 @@ class ServiceCard(MDCard):
         try:
             code = self.totp_code.replace(" ", "")
             Clipboard.copy(code)
-            toast(f"Код скопирован: {self.totp_code}")
+            toast(t("Code copied", "Код скопирован") + f": {self.totp_code}")
         except Exception:
             pass
 
@@ -633,17 +678,17 @@ class ServiceCard(MDCard):
         """Show confirmation dialog before deleting."""
         app = MDApp.get_running_app()
         self._delete_dialog = MDDialog(
-            title="Delete Service",
-            text=f'Delete "{self.title}"? This cannot be undone.',
+            title=t("Delete Service", "Удалить сервис"),
+            text=t('Delete "{0}"? This cannot be undone.', 'Удалить "{0}"? Это нельзя отменить.').format(self.title),
             buttons=[
                 MDFlatButton(
-                    text="CANCEL",
+                    text=t("CANCEL", "ОТМЕНА"),
                     theme_text_color="Custom",
                     text_color=app.theme_cls.primary_color,
                     on_release=lambda x: self._delete_dialog.dismiss(),
                 ),
                 MDRaisedButton(
-                    text="DELETE",
+                    text=t("DELETE", "УДАЛИТЬ"),
                     md_bg_color=[0.9, 0.3, 0.3, 1],
                     on_release=lambda x: self._do_delete(),
                 ),
@@ -676,21 +721,21 @@ class AddEditScreen(MDScreen):
         if self.editing_index >= 0:
             app = MDApp.get_running_app()
             service = app.services[self.editing_index]
-            self.ids.toolbar.title = "Редактировать сервис"
+            self.ids.toolbar.title = t("Edit Service", "Редактировать сервис")
             self.ids.field_title.text = service.get("title", "")
             self.ids.field_url.text = service.get("url", "")
             self.ids.field_secret.text = service.get("secret", "")
             self.ids.field_account.text = service.get("account", "")
             self.ids.field_backup.text = service.get("backup_codes", "")
-            self.ids.save_btn.text = "ОБНОВИТЬ"
+            self.ids.save_btn.text = _btn_update
         else:
-            self.ids.toolbar.title = "Добавить сервис"
+            self.ids.toolbar.title = _add_service
             self.ids.field_title.text = ""
             self.ids.field_url.text = ""
             self.ids.field_secret.text = ""
             self.ids.field_account.text = ""
             self.ids.field_backup.text = ""
-            self.ids.save_btn.text = "СОХРАНИТЬ"
+            self.ids.save_btn.text = _btn_save
 
     def save_service(self):
         """Validate and save the service."""
@@ -699,13 +744,13 @@ class AddEditScreen(MDScreen):
 
         if not title:
             self.ids.field_title.error = True
-            self.ids.field_title.helper_text = "Название обязательно"
+            self.ids.field_title.helper_text = t("Name is required", "Название обязательно")
             self.ids.field_title.helper_text_mode = "on_error"
             return
 
         if not secret:
             self.ids.field_secret.error = True
-            self.ids.field_secret.helper_text = "Секретный ключ обязательно"
+            self.ids.field_secret.helper_text = t("Secret key is required", "Секретный ключ обязательно")
             self.ids.field_secret.helper_text_mode = "on_error"
             return
 
@@ -715,7 +760,7 @@ class AddEditScreen(MDScreen):
             pyotp.TOTP(secret_clean).now()
         except Exception:
             self.ids.field_secret.error = True
-            self.ids.field_secret.helper_text = "Неверный Base32 секретный ключ"
+            self.ids.field_secret.helper_text = t("Invalid Base32 secret key", "Неверный Base32 секретный ключ")
             self.ids.field_secret.helper_text_mode = "on_error"
             return
 
@@ -731,10 +776,10 @@ class AddEditScreen(MDScreen):
 
         if self.editing_index >= 0:
             app.services[self.editing_index] = service_data
-            msg = f'"{title}" updated'
+            msg = f'"{title}" ' + t("updated", "обновлено")
         else:
             app.services.append(service_data)
-            msg = f'"{title}" added'
+            msg = f'"{title}" ' + t("added", "добавлено")
 
         save_services(app.services)
         app.refresh_main_screen()
@@ -752,11 +797,11 @@ class AddEditScreen(MDScreen):
         def on_image(path_or_paths):
             path = path_or_paths[0] if isinstance(path_or_paths, list) else path_or_paths
             if not path or not os.path.exists(path):
-                toast("Изображение не выбрано")
+                toast(t("No image selected", "Изображение не выбрано"))
                 return
             data = _decode_qr_from_path(path)
             if not data:
-                toast("QR-код не найден на изображении")
+                toast(t("QR code not found in image", "QR-код не найден на изображении"))
                 return
             self._apply_otpauth(data)
 
@@ -767,7 +812,7 @@ class AddEditScreen(MDScreen):
                 os.close(fd)
                 camera.take_picture(filename=path, on_complete=lambda p: self._on_camera_done(p or path))
             except Exception as e:
-                toast(f"Камера: {e}")
+                toast(t("Camera", "Камера") + f": {e}")
         else:
             def _pick_file():
                 try:
@@ -778,14 +823,14 @@ class AddEditScreen(MDScreen):
                     if result:
                         Clock.schedule_once(lambda dt: on_image(result), 0)
                 except Exception as e:
-                    Clock.schedule_once(lambda dt: toast(f"Ошибка: {e}"), 0)
+                    Clock.schedule_once(lambda dt: toast(t("Error", "Ошибка") + f": {e}"), 0)
 
             threading.Thread(target=_pick_file, daemon=True).start()
 
     def _on_camera_done(self, path):
         """Called when camera capture completes on Android."""
         if not path or not os.path.exists(path):
-            toast("Фото не получено")
+            toast(t("Photo not received", "Фото не получено"))
             return
         try:
             data = _decode_qr_from_path(path)
@@ -794,17 +839,17 @@ class AddEditScreen(MDScreen):
             except Exception:
                 pass
             if not data:
-                toast("QR-код не найден")
+                toast(t("QR code not found", "QR-код не найден"))
                 return
             self._apply_otpauth(data)
         except Exception as e:
-            toast(f"Ошибка: {e}")
+            toast(t("Error", "Ошибка") + f": {e}")
 
     def _apply_otpauth(self, uri: str):
         """Parse otpauth:// URI and fill form fields."""
         uri = uri.strip()
         if not uri.lower().startswith("otpauth://"):
-            toast("Неверный формат (ожидается otpauth://)")
+            toast(t("Invalid format (expected otpauth://)", "Неверный формат (ожидается otpauth://)"))
             return
         try:
             parsed = urllib.parse.urlparse(uri)
@@ -826,9 +871,9 @@ class AddEditScreen(MDScreen):
             self.ids.field_account.text = account
             self.ids.field_title.helper_text_mode = "on_focus"
             self.ids.field_secret.helper_text_mode = "on_focus"
-            toast("QR-код считан")
+            toast(t("QR code scanned", "QR-код считан"))
         except Exception as e:
-            toast(f"Ошибка разбора: {e}")
+            toast(t("Parse error", "Ошибка разбора") + f": {e}")
 
     def go_back(self):
         app = MDApp.get_running_app()
@@ -911,17 +956,26 @@ class AuthenticatorApp(MDApp):
         abs_offset = abs(offset)
 
         if abs_offset > 5:
-            direction = "спешат" if offset > 0 else "отстают"
+            direction_ru = "спешат" if offset > 0 else "отстают"
+            direction_en = "ahead" if offset > 0 else "behind"
+            direction = direction_ru if _is_russian() else direction_en
+            title_ntp = t("Clock Out of Sync", "Часы рассинхронизированы")
+            text_ntp = (
+                f"Ваше системное время на {abs_offset:.1f}s {direction} "
+                f"от фактического времени.\n\n"
+                f"TOTP коды могут не работать правильно, если смещение "
+                f"превышает 30 секунд.\n\n"
+                f"Пожалуйста, синхронизируйте ваше системное время:\n"
+                f"Настройки > Система > Время и дата > Синхронизировать сейчас"
+            ) if _is_russian() else (
+                f"Your system time is {abs_offset:.1f}s {direction} of actual time.\n\n"
+                "TOTP codes may not work correctly if the offset exceeds 30 seconds.\n\n"
+                "Please sync your system time:\n"
+                "Settings > System > Date & time > Sync now"
+            )
             self._ntp_dialog = MDDialog(
-                title="Clock Out of Sync",
-                text=(
-                    f"Ваше системное время на {abs_offset:.1f}s {direction} "
-                    f"от фактического времени.\n\n"
-                    f"TOTP коды могут не работать правильно, если смещение "
-                    f"превышает 30 секунд.\n\n"
-                    f"Пожалуйста, синхронизируйте ваше системное время:\n"
-                    f"Настройки > Система > Время и дата > Синхронизировать сейчас"
-                ),
+                title=title_ntp,
+                text=text_ntp,
                 buttons=[
                     MDFlatButton(
                         text="OK",
@@ -933,7 +987,7 @@ class AuthenticatorApp(MDApp):
             )
             self._ntp_dialog.open()
         else:
-            toast(f"Часы синхронизированы (смещение: {abs_offset:.1f}s)")
+            toast(t("Clock synced (offset: {:.1f}s)", "Часы синхронизированы (смещение: {:.1f}s)").format(abs_offset))
 
     def refresh_main_screen(self):
         """Rebuild the services list on main screen."""
@@ -944,7 +998,7 @@ class AuthenticatorApp(MDApp):
         if not self.services:
             # Show empty state
             empty_label = MDLabel(
-                text="Еще нет сервисов.\nНажмите [b]+[/b] чтобы добавить первый сервис.",
+                text=t("No services yet.\nTap [b]+[/b] to add the first one.", "Еще нет сервисов.\nНажмите [b]+[/b] чтобы добавить первый сервис."),
                 halign="center",
                 theme_text_color="Hint",
                 font_style="Subtitle1",
@@ -982,7 +1036,7 @@ class AuthenticatorApp(MDApp):
             removed = self.services.pop(index)
             save_services(self.services)
             self.refresh_main_screen()
-            toast(f'"{removed.get("title", "")}" удален')
+            toast(f'"{removed.get("title", "")}" ' + t("deleted", "удален"))
 
     def open_backup_codes(self, index: int):
         """Show backup codes for a service."""
@@ -1014,7 +1068,7 @@ class AuthenticatorApp(MDApp):
         else:
             container.add_widget(
                 MDLabel(
-                    text="Нет резервных кодов.",
+                    text=t("No backup codes.", "Нет резервных кодов."),
                     theme_text_color="Hint",
                     size_hint_y=None,
                     height=dp(48),
