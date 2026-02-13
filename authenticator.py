@@ -10,6 +10,8 @@ import time
 import struct
 import socket
 import threading
+import tempfile
+import urllib.parse
 import pyotp
 from kivy.core.clipboard import Clipboard
 from pathlib import Path
@@ -50,8 +52,41 @@ if platform not in ("android", "ios"):
     Window.size = (400, 720)
 
 # ── White background image for bubble menu ──
-import tempfile
 from PIL import Image as _PILImage
+
+# ── QR scan dependencies (pyzbar or opencv fallback) ──
+def _decode_qr_from_path(path):
+    """Decode QR from image path. Returns str or None. Tries pyzbar, then cv2."""
+    try:
+        from pyzbar import pyzbar
+        img = _PILImage.open(path).convert("RGB")
+        decoded = pyzbar.decode(img)
+        if decoded:
+            return decoded[0].data.decode("utf-8", errors="ignore")
+    except Exception:
+        pass
+    try:
+        import cv2
+        img = cv2.imread(path)
+        if img is not None:
+            data, _, _ = cv2.QRCodeDetector().detectAndDecode(img)
+            if data:
+                return data
+    except Exception:
+        pass
+    return None
+
+
+try:
+    from pyzbar import pyzbar
+    _HAS_QR_DECODER = True
+except ImportError:
+    try:
+        import cv2
+        _ = cv2.QRCodeDetector()
+        _HAS_QR_DECODER = True
+    except Exception:
+        _HAS_QR_DECODER = False
 _white_bg = os.path.join(tempfile.gettempdir(), '_kivy_white_bg.png').replace('\\', '/')
 if not os.path.exists(_white_bg):
     _PILImage.new('RGBA', (4, 4), (247, 247, 247, 255)).save(_white_bg)
@@ -436,7 +471,7 @@ KV = """
             md_bg_color: app.theme_cls.primary_color
             specific_text_color: 1, 1, 1, 1
             left_action_items: [["arrow-left", lambda x: root.go_back()]]
-            right_action_items: [["", lambda x: None]]
+            right_action_items: [["camera", lambda x: root.scan_qr()]]
 
         MDScrollView:
             do_scroll_x: False
@@ -707,6 +742,93 @@ class AddEditScreen(MDScreen):
         toast(msg)
 
         self.go_back()
+
+    def scan_qr(self):
+        """Open camera (or file picker on desktop) to scan QR code and fill fields."""
+        if not _HAS_QR_DECODER:
+            toast("Установите pyzbar или opencv-python для сканирования QR")
+            return
+
+        def on_image(path_or_paths):
+            path = path_or_paths[0] if isinstance(path_or_paths, list) else path_or_paths
+            if not path or not os.path.exists(path):
+                toast("Изображение не выбрано")
+                return
+            data = _decode_qr_from_path(path)
+            if not data:
+                toast("QR-код не найден на изображении")
+                return
+            self._apply_otpauth(data)
+
+        if platform == "android":
+            try:
+                from plyer import camera
+                fd, path = tempfile.mkstemp(suffix=".jpg")
+                os.close(fd)
+                camera.take_picture(filename=path, on_complete=lambda p: self._on_camera_done(p or path))
+            except Exception as e:
+                toast(f"Камера: {e}")
+        else:
+            def _pick_file():
+                try:
+                    from plyer import filechooser
+                    result = filechooser.open_file(
+                        filters=[["Images", "*.png", "*.jpg", "*.jpeg", "*.bmp"]],
+                    )
+                    if result:
+                        Clock.schedule_once(lambda dt: on_image(result), 0)
+                except Exception as e:
+                    Clock.schedule_once(lambda dt: toast(f"Ошибка: {e}"), 0)
+
+            threading.Thread(target=_pick_file, daemon=True).start()
+
+    def _on_camera_done(self, path):
+        """Called when camera capture completes on Android."""
+        if not path or not os.path.exists(path):
+            toast("Фото не получено")
+            return
+        try:
+            data = _decode_qr_from_path(path)
+            try:
+                os.remove(path)
+            except Exception:
+                pass
+            if not data:
+                toast("QR-код не найден")
+                return
+            self._apply_otpauth(data)
+        except Exception as e:
+            toast(f"Ошибка: {e}")
+
+    def _apply_otpauth(self, uri: str):
+        """Parse otpauth:// URI and fill form fields."""
+        uri = uri.strip()
+        if not uri.lower().startswith("otpauth://"):
+            toast("Неверный формат (ожидается otpauth://)")
+            return
+        try:
+            parsed = urllib.parse.urlparse(uri)
+            params = urllib.parse.parse_qs(parsed.query)
+            secret = (params.get("secret", [""]) or [""])[0]
+            issuer = (params.get("issuer", [""]) or [""])[0]
+            label = urllib.parse.unquote((parsed.path or "").lstrip("/").replace("totp/", "").strip())
+            if ":" in label:
+                parts = label.split(":", 1)
+                if not issuer:
+                    issuer = parts[0].strip()
+                account = parts[1].strip() if len(parts) > 1 else ""
+            else:
+                account = label.strip()
+            self.ids.field_secret.text = secret.replace(" ", "").upper()
+            self.ids.field_secret.error = False
+            self.ids.field_title.text = issuer or account or "unknown"
+            self.ids.field_title.error = False
+            self.ids.field_account.text = account
+            self.ids.field_title.helper_text_mode = "on_focus"
+            self.ids.field_secret.helper_text_mode = "on_focus"
+            toast("QR-код считан")
+        except Exception as e:
+            toast(f"Ошибка разбора: {e}")
 
     def go_back(self):
         app = MDApp.get_running_app()

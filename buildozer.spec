@@ -23,7 +23,7 @@ version = 1.0.0
 
 # (list) Application requirements
 # comma separated e.g. requirements = sqlite3,kivy
-requirements = python3,kivy==2.3.1,kivymd==1.2.0,pyotp,pillow,materialyoucolor,exceptiongroup,asyncgui,asynckivy,filetype
+requirements = python3,kivy==2.3.1,kivymd==1.2.0,pyotp,pillow,plyer,libiconv,libzbar,pyzbar,materialyoucolor,exceptiongroup,asyncgui,asynckivy,filetype
 
 # (str) Supported orientation (one of landscape, sensorLandscape, portrait or all)
 orientation = portrait
@@ -36,7 +36,7 @@ fullscreen = 0
 #
 
 # (list) Permissions
-android.permissions = INTERNET
+android.permissions = INTERNET,CAMERA
 
 # (int) Target Android API, should be as high as possible.
 android.api = 33
