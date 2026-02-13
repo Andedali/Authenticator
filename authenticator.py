@@ -397,7 +397,7 @@ KV = """
             md_bg_color: app.theme_cls.primary_color
             specific_text_color: 1, 1, 1, 1
             left_action_items: [["", lambda x: None]]
-            right_action_items: [["plus", lambda x: root.open_add_screen(), "Добавить сервис"]]
+            right_action_items: [["plus", lambda x: root.open_add_screen(), "Добавить сервис"]] if app._is_desktop else [["plus", lambda x: root.open_add_screen()]]
 
         MDScrollView:
             id: scroll_view
@@ -725,6 +725,8 @@ class BackupCodesScreen(MDScreen):
 
 class AuthenticatorApp(MDApp):
     """Main application class."""
+
+    _is_desktop = platform not in ('android', 'ios')
 
     def __init__(self, **kwargs):
         super().__init__(**kwargs)
