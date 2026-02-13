@@ -115,6 +115,76 @@ def _decode_qr_from_path(path):
     return None
 
 
+def _take_picture_android(on_complete):
+    """
+    Launch Android camera without passing file URI (avoids FileUriExposedException).
+    Camera app saves to its location; we get content URI in result and copy to temp file.
+    """
+    try:
+        import android.activity
+        from jnius import autoclass
+
+        Intent = autoclass("android.content.Intent")
+        MediaStore = autoclass("android.provider.MediaStore")
+        PythonActivity = autoclass("org.kivy.android.PythonActivity")
+
+        intent = Intent(MediaStore.ACTION_IMAGE_CAPTURE)
+        # Do NOT set EXTRA_OUTPUT — avoids FileUriExposedException; we get URI or thumbnail in result
+
+        REQUEST_IMAGE = 0x124
+
+        def on_result(request_code, result_code, intent_obj):
+            if request_code != REQUEST_IMAGE:
+                return
+            android.activity.unbind(on_activity_result=on_result)
+            if result_code != -1 or intent_obj is None:  # -1 = RESULT_OK
+                Clock.schedule_once(lambda dt: on_complete(None), 0)
+                return
+            path = None
+            try:
+                context = PythonActivity.mActivity
+                uri = intent_obj.getData()
+                if uri is not None:
+                    resolver = context.getContentResolver()
+                    inp = resolver.openInputStream(uri)
+                    fd, path = tempfile.mkstemp(suffix=".jpg")
+                    try:
+                        with os.fdopen(fd, "wb") as f:
+                            buf = inp.read()
+                            if buf:
+                                f.write(buf if isinstance(buf, bytes) else buf.encode())
+                    finally:
+                        try:
+                            inp.close()
+                        except Exception:
+                            pass
+                else:
+                    extras = intent_obj.getExtras()
+                    if extras is not None:
+                        bitmap = extras.get("data")
+                        if bitmap is not None:
+                            fd, path = tempfile.mkstemp(suffix=".jpg")
+                            out = os.fdopen(fd, "wb")
+                            ByteArrayOutputStream = autoclass("java.io.ByteArrayOutputStream")
+                            bos = ByteArrayOutputStream()
+                            JPEG = autoclass("android.graphics.Bitmap$CompressFormat").JPEG
+                            bitmap.compress(JPEG, 90, bos)
+                            arr = bos.toByteArray()
+                            out.write(arr if isinstance(arr, bytes) else bytes(list(arr)))
+                            out.close()
+                if path:
+                    Clock.schedule_once(lambda dt: on_complete(path), 0)
+                else:
+                    Clock.schedule_once(lambda dt: on_complete(None), 0)
+            except Exception:
+                Clock.schedule_once(lambda dt: on_complete(None), 0)
+
+        android.activity.bind(on_activity_result=on_result)
+        PythonActivity.mActivity.startActivityForResult(intent, REQUEST_IMAGE)
+    except Exception:
+        Clock.schedule_once(lambda dt: on_complete(None), 0)
+
+
 def _has_qr_decoder():
     """Check if QR decoder is available. On Android we allow scan anyway (decode tried on photo)."""
     if platform == "android":
@@ -562,10 +632,7 @@ class AddEditScreen(MDScreen):
 
         if platform == "android":
             try:
-                from plyer import camera
-                fd, path = tempfile.mkstemp(suffix=".jpg")
-                os.close(fd)
-                camera.take_picture(filename=path, on_complete=lambda p: self._on_camera_done(p or path))
+                _take_picture_android(self._on_camera_done)
             except Exception as e:
                 toast(t("Camera", "Камера") + f": {e}")
         else:
