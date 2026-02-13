@@ -52,21 +52,36 @@ if platform not in ("android", "ios"):
     Window.size = (400, 720)
 
 # ── Locale: Russian if system is Russian, else English ───────────────
+_IS_RUSSIAN_CACHED = None
+
 def _is_russian():
-    try:
-        import locale
-        loc = (locale.getlocale() or ("en",))[0] or (locale.getdefaultlocale() or ("en",))[0] or "en"
-        if loc:
-            return loc.split("_")[0].lower() == "ru"
-    except Exception:
-        pass
+    """Check if system locale is Russian. Cached after first call."""
+    global _IS_RUSSIAN_CACHED
+    if _IS_RUSSIAN_CACHED is not None:
+        return _IS_RUSSIAN_CACHED
+    
+    # Check Android first (most reliable)
     if platform == "android":
         try:
             from jnius import autoclass
             Locale = autoclass("java.util.Locale")
-            return (Locale.getDefault().getLanguage() or "en") == "ru"
+            lang = Locale.getDefault().getLanguage() or "en"
+            _IS_RUSSIAN_CACHED = lang == "ru"
+            return _IS_RUSSIAN_CACHED
         except Exception:
             pass
+    
+    # Fallback to locale module
+    try:
+        import locale
+        loc = (locale.getlocale() or ("en",))[0] or (locale.getdefaultlocale() or ("en",))[0] or "en"
+        if loc:
+            _IS_RUSSIAN_CACHED = loc.split("_")[0].lower() == "ru"
+            return _IS_RUSSIAN_CACHED
+    except Exception:
+        pass
+    
+    _IS_RUSSIAN_CACHED = False
     return False
 
 
@@ -100,16 +115,20 @@ def _decode_qr_from_path(path):
     return None
 
 
-try:
-    from pyzbar import pyzbar
-    _HAS_QR_DECODER = True
-except ImportError:
+def _has_qr_decoder():
+    """Check if QR decoder is available. Dynamic check (not cached at import)."""
+    try:
+        from pyzbar import pyzbar
+        return True
+    except ImportError:
+        pass
     try:
         import cv2
         _ = cv2.QRCodeDetector()
-        _HAS_QR_DECODER = True
+        return True
     except Exception:
-        _HAS_QR_DECODER = False
+        pass
+    return False
 _white_bg = os.path.join(tempfile.gettempdir(), '_kivy_white_bg.png').replace('\\', '/')
 if not os.path.exists(_white_bg):
     _PILImage.new('RGBA', (4, 4), (247, 247, 247, 255)).save(_white_bg)
@@ -352,25 +371,8 @@ def check_ntp_offset(callback, timeout=5):
 
 
 # ── KV Language UI definition ────────────────────────────────────────
-_app_title = t("Authenticator", "Аутентификатор")
-_add_service = t("Add Service", "Добавить сервис")
-_empty_services = t("No services yet.\\nTap + to add the first one.", "Еще нет сервисов.\\nНажмите + чтобы добавить первый сервис.")
-_edit_service = t("Edit Service", "Редактировать сервис")
-_backup_codes = t("Backup Codes", "Резервные коды")
-_hint_title = t("Name *", "Название *")
-_hint_title_help = t("e.g. Google, GitHub, Discord", "например, Google, GitHub, Discord")
-_hint_url = t("Service URL", "URL сервиса")
-_hint_url_help = t("e.g. https://accounts.google.com", "например, https://accounts.google.com")
-_hint_secret = t("Secret Key *", "Секретный ключ *")
-_hint_secret_help = t("Base32-encoded secret from the service", "Base32 закодированный секрет от сервиса")
-_hint_account = t("Account", "Аккаунт")
-_hint_account_help = t("e.g. user@gmail.com", "например, user@gmail.com")
-_hint_backup = t("Backup Codes", "Резервные коды")
-_hint_backup_help = t("Comma-separated backup codes", "Запятая-разделенные резервные коды")
-_btn_save = t("SAVE", "СОХРАНИТЬ")
-_btn_update = t("UPDATE", "ОБНОВИТЬ")
-
-KV = f"""
+# Variables will be computed in build() after Android initialization
+KV_TEMPLATE = """
 #:import Clock kivy.clock.Clock
 
 <ServiceCard>:
@@ -583,6 +585,7 @@ KV = f"""
                 MDRaisedButton:
                     id: save_btn
                     text: "{_btn_save}"
+                    # _btn_update will be set dynamically in on_enter
                     md_bg_color: app.theme_cls.primary_color
                     pos_hint: {{"center_x": .5}}
                     size_hint_x: 0.6
@@ -727,15 +730,15 @@ class AddEditScreen(MDScreen):
             self.ids.field_secret.text = service.get("secret", "")
             self.ids.field_account.text = service.get("account", "")
             self.ids.field_backup.text = service.get("backup_codes", "")
-            self.ids.save_btn.text = _btn_update
+            self.ids.save_btn.text = t("UPDATE", "ОБНОВИТЬ")
         else:
-            self.ids.toolbar.title = _add_service
+            self.ids.toolbar.title = t("Add Service", "Добавить сервис")
             self.ids.field_title.text = ""
             self.ids.field_url.text = ""
             self.ids.field_secret.text = ""
             self.ids.field_account.text = ""
             self.ids.field_backup.text = ""
-            self.ids.save_btn.text = _btn_save
+            self.ids.save_btn.text = t("SAVE", "СОХРАНИТЬ")
 
     def save_service(self):
         """Validate and save the service."""
@@ -790,8 +793,8 @@ class AddEditScreen(MDScreen):
 
     def scan_qr(self):
         """Open camera (or file picker on desktop) to scan QR code and fill fields."""
-        if not _HAS_QR_DECODER:
-            toast("Установите pyzbar или opencv-python для сканирования QR")
+        if not _has_qr_decoder():
+            toast(t("QR scanner not available", "Сканер QR недоступен"))
             return
 
         def on_image(path_or_paths):
@@ -914,6 +917,44 @@ class AuthenticatorApp(MDApp):
         self.theme_cls.primary_palette = "Teal"
         self.theme_cls.accent_palette = "Cyan"
         self.theme_cls.material_style = "M3"
+
+        # Compute translation variables after Android initialization
+        _app_title = t("Authenticator", "Аутентификатор")
+        _add_service = t("Add Service", "Добавить сервис")
+        _empty_services = t("No services yet.\\nTap + to add the first one.", "Еще нет сервисов.\\nНажмите + чтобы добавить первый сервис.")
+        _edit_service = t("Edit Service", "Редактировать сервис")
+        _backup_codes = t("Backup Codes", "Резервные коды")
+        _hint_title = t("Name *", "Название *")
+        _hint_title_help = t("e.g. Google, GitHub, Discord", "например, Google, GitHub, Discord")
+        _hint_url = t("Service URL", "URL сервиса")
+        _hint_url_help = t("e.g. https://accounts.google.com", "например, https://accounts.google.com")
+        _hint_secret = t("Secret Key *", "Секретный ключ *")
+        _hint_secret_help = t("Base32-encoded secret from the service", "Base32 закодированный секрет от сервиса")
+        _hint_account = t("Account", "Аккаунт")
+        _hint_account_help = t("e.g. user@gmail.com", "например, user@gmail.com")
+        _hint_backup = t("Backup Codes", "Резервные коды")
+        _hint_backup_help = t("Comma-separated backup codes", "Запятая-разделенные резервные коды")
+        _btn_save = t("SAVE", "СОХРАНИТЬ")
+        _btn_update = t("UPDATE", "ОБНОВИТЬ")
+
+        # Build KV with translations
+        KV = KV_TEMPLATE.format(
+            _app_title=_app_title,
+            _add_service=_add_service,
+            _empty_services=_empty_services,
+            _backup_codes=_backup_codes,
+            _hint_title=_hint_title,
+            _hint_title_help=_hint_title_help,
+            _hint_url=_hint_url,
+            _hint_url_help=_hint_url_help,
+            _hint_secret=_hint_secret,
+            _hint_secret_help=_hint_secret_help,
+            _hint_account=_hint_account,
+            _hint_account_help=_hint_account_help,
+            _hint_backup=_hint_backup,
+            _hint_backup_help=_hint_backup_help,
+            _btn_save=_btn_save,
+        )
 
         Builder.load_string(KV)
 
