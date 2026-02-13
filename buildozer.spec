@@ -74,8 +74,12 @@ android.allow_backup = True
 # (str) Android logcat filters to use
 android.logcat_filters = *:S python:D
 
-# (str) Icon of the application
+# (str) Icon of the application (legacy fallback)
 icon.filename = %(source.dir)s/icon.png
+
+# (str) Adaptive icon (Android 8+ uses these two layers instead of icon.filename)
+icon.adaptive_foreground.filename = %(source.dir)s/icon_fg.png
+icon.adaptive_background.filename = %(source.dir)s/icon_bg.png
 
 # (str) Presplash of the application
 presplash.filename = %(source.dir)s/presplash.png
