@@ -12,6 +12,7 @@ import socket
 import threading
 import tempfile
 import urllib.parse
+import numpy as np
 import pyotp
 from kivy.core.clipboard import Clipboard
 from pathlib import Path
@@ -44,6 +45,7 @@ from kivymd.uix.toolbar import MDTopAppBar
 from kivymd.uix.progressbar import MDProgressBar
 from kivy.uix.label import Label
 from kivy.uix.modalview import ModalView
+from kivy.uix.camera import Camera
 from kivy.animation import Animation
 
 # ── Window size for desktop testing (ignored on mobile) ──────────────
@@ -110,6 +112,28 @@ def _decode_qr_from_path(path):
             data, _, _ = cv2.QRCodeDetector().detectAndDecode(img)
             if data:
                 return data
+    except Exception:
+        pass
+    return None
+
+
+def _decode_qr_from_frame(frame_bgr):
+    """Decode QR from numpy array (BGR, from OpenCV). Returns str or None."""
+    try:
+        import cv2
+        data, _, _ = cv2.QRCodeDetector().detectAndDecode(frame_bgr)
+        if data:
+            return data
+    except Exception:
+        pass
+    try:
+        import cv2
+        from pyzbar import pyzbar
+        frame_rgb = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2RGB)
+        img = _PILImage.fromarray(frame_rgb)
+        decoded = pyzbar.decode(img)
+        if decoded:
+            return decoded[0].data.decode("utf-8", errors="ignore")
     except Exception:
         pass
     return None
@@ -614,7 +638,7 @@ class AddEditScreen(MDScreen):
         self.go_back()
 
     def scan_qr(self):
-        """Open camera (or file picker on desktop) to scan QR code and fill fields."""
+        """Open live camera scanner (or file picker on desktop) to scan QR and fill fields."""
         if not _has_qr_decoder():
             toast(t("QR scanner not available", "Сканер QR недоступен"))
             return
@@ -631,10 +655,9 @@ class AddEditScreen(MDScreen):
             self._apply_otpauth(data)
 
         if platform == "android":
-            try:
-                _take_picture_android(self._on_camera_done)
-            except Exception as e:
-                toast(t("Camera", "Камера") + f": {e}")
+            app = MDApp.get_running_app()
+            app.sm.transition.direction = "left"
+            app.sm.current = "qr_scan"
         else:
             def _pick_file():
                 try:
@@ -712,6 +735,119 @@ class BackupCodesScreen(MDScreen):
         app.sm.current = "main"
 
 
+class QRScanScreen(MDScreen):
+    """Full-screen live QR scanner. On QR found: fill add_edit fields and close."""
+
+    def __init__(self, **kwargs):
+        super().__init__(**kwargs)
+        self._scan_event = None
+        self._camera = None
+
+    def on_enter(self):
+        """Start camera and scanning loop."""
+        self._start_camera()
+
+    def on_leave(self):
+        """Stop camera when leaving screen."""
+        self._stop_camera()
+
+    def _start_camera(self):
+        self._stop_camera()
+        try:
+            self._camera = Camera(
+                index=0,
+                resolution=(640, 480),
+                play=True,
+            )
+            self.ids.camera_container.clear_widgets()
+            self.ids.camera_container.add_widget(self._camera)
+            self._scan_event = Clock.schedule_interval(self._scan_frame, 1 / 10)
+        except Exception as e:
+            toast(t("Camera error", "Ошибка камеры") + f": {e}")
+            self._fallback_to_photo()
+
+    def _fallback_to_photo(self):
+        """Fallback: take single photo via system camera when live preview fails."""
+        self._go_back()
+        app = MDApp.get_running_app()
+        add_screen = app.add_edit_screen
+
+        def on_done(path):
+            if path and os.path.exists(path):
+                try:
+                    data = _decode_qr_from_path(path)
+                    try:
+                        os.remove(path)
+                    except Exception:
+                        pass
+                    if data:
+                        add_screen._apply_otpauth(data)
+                        toast(t("QR code scanned", "QR-код считан"))
+                        return
+                except Exception:
+                    pass
+            toast(t("Photo not received", "Фото не получено"))
+
+        try:
+            _take_picture_android(lambda p: Clock.schedule_once(lambda dt: on_done(p), 0))
+        except Exception as e:
+            toast(t("Camera", "Камера") + f": {e}")
+
+    def _stop_camera(self):
+        if self._scan_event:
+            self._scan_event.cancel()
+            self._scan_event = None
+        if self._camera:
+            try:
+                self._camera.play = False
+            except Exception:
+                pass
+            self._camera = None
+        self.ids.camera_container.clear_widgets()
+
+    def _scan_frame(self, dt):
+        cam = self._camera
+        if not cam:
+            return
+        frame_bgr = None
+        try:
+            provider = getattr(cam, "_camera", None)
+            if provider is not None and hasattr(provider, "read_frame"):
+                frame_bgr = provider.read_frame()
+            if frame_bgr is None and cam.texture and cam.texture.pixels:
+                import cv2
+                tex = cam.texture
+                w, h = tex.size
+                buf = tex.pixels
+                if buf and w >= 100 and h >= 100:
+                    arr = np.frombuffer(buf, dtype=np.uint8)
+                    if arr.size == w * h * 4:
+                        arr = arr.reshape((h, w, 4))
+                        arr = np.flipud(arr)
+                        frame_bgr = cv2.cvtColor(arr, cv2.COLOR_RGBA2BGR)
+                    elif arr.size == w * h * 3:
+                        arr = arr.reshape((h, w, 3))
+                        arr = np.flipud(arr)
+                        frame_bgr = cv2.cvtColor(arr, cv2.COLOR_RGB2BGR)
+            if frame_bgr is not None:
+                data = _decode_qr_from_frame(frame_bgr)
+                if data and data.strip().lower().startswith("otpauth://"):
+                    self._stop_camera()
+                    app = MDApp.get_running_app()
+                    add_screen = app.add_edit_screen
+                    add_screen._apply_otpauth(data)
+                    toast(t("QR code scanned", "QR-код считан"))
+                    self._go_back()
+        except Exception:
+            pass
+
+    def _go_back(self):
+        self._stop_camera()
+        app = MDApp.get_running_app()
+        app.sm.transition.direction = "right"
+        app.sm.current = "add_edit"
+
+
 class AuthenticatorApp(MDApp):
     """Main application class."""
 
@@ -755,6 +891,7 @@ class AuthenticatorApp(MDApp):
         _hint_backup_help = t("Comma-separated backup codes", "Запятая-разделенные резервные коды")
         _btn_save = t("SAVE", "СОХРАНИТЬ")
         _btn_update = t("UPDATE", "ОБНОВИТЬ")
+        _scan_qr_title = t("Scan QR Code", "Сканировать QR-код")
 
         # Build KV with translations using f-string
         KV = f"""
@@ -1005,6 +1142,26 @@ class AuthenticatorApp(MDApp):
                 spacing: dp(8)
                 size_hint_y: None
                 height: self.minimum_height
+
+
+<QRScanScreen>:
+    name: "qr_scan"
+
+    MDBoxLayout:
+        orientation: "vertical"
+
+        MDTopAppBar:
+            title: "{_scan_qr_title}"
+            anchor_title: "center"
+            elevation: 0
+            md_bg_color: app.theme_cls.primary_color
+            specific_text_color: 1, 1, 1, 1
+            left_action_items: [["arrow-left", lambda x: root._go_back()]]
+            right_action_items: [["", lambda x: None]]
+
+        BoxLayout:
+            id: camera_container
+            size_hint_y: 1
 """
 
         Builder.load_string(KV)
@@ -1017,10 +1174,12 @@ class AuthenticatorApp(MDApp):
         self.main_screen = MainScreen()
         self.add_edit_screen = AddEditScreen()
         self.backup_screen = BackupCodesScreen()
+        self.qr_scan_screen = QRScanScreen()
 
         self.sm.add_widget(self.main_screen)
         self.sm.add_widget(self.add_edit_screen)
         self.sm.add_widget(self.backup_screen)
+        self.sm.add_widget(self.qr_scan_screen)
 
         # Populate services list
         self.refresh_main_screen()
