@@ -116,7 +116,9 @@ def _decode_qr_from_path(path):
 
 
 def _has_qr_decoder():
-    """Check if QR decoder is available. Dynamic check (not cached at import)."""
+    """Check if QR decoder is available. On Android we allow scan anyway (decode tried on photo)."""
+    if platform == "android":
+        return True  # opencv is in build; decode will be tried when photo is taken
     try:
         from pyzbar import pyzbar
         return True
