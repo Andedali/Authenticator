@@ -46,6 +46,7 @@ from kivymd.uix.progressbar import MDProgressBar
 from kivy.uix.label import Label
 from kivy.uix.modalview import ModalView
 from kivy.uix.camera import Camera
+from kivy.graphics.texture import Texture
 from kivy.animation import Animation
 
 # ── Window size for desktop testing (ignored on mobile) ──────────────
@@ -742,6 +743,8 @@ class QRScanScreen(MDScreen):
         super().__init__(**kwargs)
         self._scan_event = None
         self._camera = None
+        self._capture = None
+        self._preview_image = None
 
     def on_enter(self):
         """Start camera and scanning loop."""
@@ -753,15 +756,51 @@ class QRScanScreen(MDScreen):
 
     def _start_camera(self):
         self._stop_camera()
+        if platform == "android":
+            self._start_camera_opencv()
+        else:
+            self._start_camera_kivy()
+
+    def _start_camera_opencv(self):
+        """Use OpenCV VideoCapture for full control: fullscreen, rotation, QR frames."""
+        try:
+            import cv2
+            self._capture = cv2.VideoCapture(0)
+            if not self._capture.isOpened():
+                self._capture = None
+                raise RuntimeError("Camera not opened")
+            self._capture.set(cv2.CAP_PROP_FRAME_WIDTH, 640)
+            self._capture.set(cv2.CAP_PROP_FRAME_HEIGHT, 480)
+            from kivy.uix.image import Image
+            self._preview_image = Image(allow_stretch=True, keep_ratio=False, size_hint=(1, 1))
+            self.ids.camera_container.clear_widgets()
+            self.ids.camera_container.add_widget(self._preview_image)
+            self._scan_event = Clock.schedule_interval(self._scan_frame_opencv, 1 / 15)
+        except Exception as e:
+            if self._capture:
+                try:
+                    self._capture.release()
+                except Exception:
+                    pass
+                self._capture = None
+            toast(t("Camera error", "Ошибка камеры") + f": {e}")
+            self._start_camera_kivy()
+
+    def _start_camera_kivy(self):
+        """Fallback: Kivy Camera widget."""
         try:
             self._camera = Camera(
                 index=0,
                 resolution=(640, 480),
                 play=True,
+                allow_stretch=True,
+                keep_ratio=False,
+                size_hint=(1, 1),
             )
+            self._camera.rotation = -90
             self.ids.camera_container.clear_widgets()
             self.ids.camera_container.add_widget(self._camera)
-            self._scan_event = Clock.schedule_interval(self._scan_frame, 1 / 10)
+            self._scan_event = Clock.schedule_interval(self._scan_frame, 1 / 15)
         except Exception as e:
             toast(t("Camera error", "Ошибка камеры") + f": {e}")
             self._fallback_to_photo()
@@ -797,6 +836,13 @@ class QRScanScreen(MDScreen):
         if self._scan_event:
             self._scan_event.cancel()
             self._scan_event = None
+        if self._capture:
+            try:
+                self._capture.release()
+            except Exception:
+                pass
+            self._capture = None
+        self._preview_image = None
         if self._camera:
             try:
                 self._camera.play = False
@@ -805,17 +851,60 @@ class QRScanScreen(MDScreen):
             self._camera = None
         self.ids.camera_container.clear_widgets()
 
+    def _scan_frame_opencv(self, dt):
+        """Scan frame from cv2.VideoCapture, update preview, decode QR."""
+        cap = self._capture
+        img_widget = self._preview_image
+        if not cap or not cap.isOpened() or not img_widget:
+            return
+        try:
+            import cv2
+            ret, frame = cap.read()
+            if not ret or frame is None:
+                return
+            frame = cv2.rotate(frame, cv2.ROTATE_90_COUNTERCLOCKWISE)
+            buf = cv2.flip(frame, 0)
+            buf = cv2.cvtColor(buf, cv2.COLOR_BGR2RGB)
+            buf = buf.tobytes()
+            h, w = frame.shape[:2]
+            tex = Texture.create(size=(w, h), colorfmt="rgb")
+            tex.blit_buffer(buf, colorfmt="rgb", bufferfmt="ubyte")
+            img_widget.texture = tex
+            data = _decode_qr_from_frame(frame)
+            if data and data.strip().lower().startswith("otpauth://"):
+                self._stop_camera()
+                app = MDApp.get_running_app()
+                add_screen = app.add_edit_screen
+                add_screen._apply_otpauth(data)
+                toast(t("QR code scanned", "QR-код считан"))
+                self._go_back()
+        except Exception:
+            pass
+
     def _scan_frame(self, dt):
         cam = self._camera
         if not cam:
             return
         frame_bgr = None
         try:
+            import cv2
             provider = getattr(cam, "_camera", None)
-            if provider is not None and hasattr(provider, "read_frame"):
-                frame_bgr = provider.read_frame()
+            if provider is not None:
+                if hasattr(provider, "read_frame"):
+                    frame_bgr = provider.read_frame()
+                elif hasattr(provider, "grab_frame") and hasattr(provider, "decode_frame"):
+                    buf = provider.grab_frame()
+                    if buf is not None:
+                        try:
+                            buf = buf if isinstance(buf, bytes) else bytes(buf)
+                            w, h = getattr(provider, "_resolution", (640, 480))
+                            arr = np.frombuffer(buf, dtype=np.uint8)
+                            if arr.size >= (h + h // 2) * w:
+                                arr = arr[:(h + h // 2) * w].reshape((h + h // 2, w))
+                                frame_bgr = cv2.cvtColor(arr, cv2.COLOR_YUV2BGR_NV21)
+                        except Exception:
+                            pass
             if frame_bgr is None and cam.texture and cam.texture.pixels:
-                import cv2
                 tex = cam.texture
                 w, h = tex.size
                 buf = tex.pixels
@@ -866,6 +955,14 @@ class AuthenticatorApp(MDApp):
         # Set data directory (Android-safe: uses app private storage)
         set_data_dir(self.user_data_dir)
         print(f"[Authenticator] Data dir: {self.user_data_dir}")
+
+        # Request CAMERA permission at runtime (required on Android 6+)
+        if platform == "android":
+            try:
+                from android.permissions import request_permissions, Permission
+                request_permissions([Permission.CAMERA])
+            except Exception as e:
+                print(f"[Authenticator] Permission request: {e}")
 
         # Theme configuration
         self.theme_cls.theme_style = "Dark"
@@ -1161,7 +1258,7 @@ class AuthenticatorApp(MDApp):
 
         BoxLayout:
             id: camera_container
-            size_hint_y: 1
+            size_hint: 1, 1
 """
 
         Builder.load_string(KV)
