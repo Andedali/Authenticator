@@ -198,7 +198,16 @@ def _take_picture_android(on_complete):
                             out.write(arr if isinstance(arr, bytes) else bytes(list(arr)))
                             out.close()
                 if path:
-                    Clock.schedule_once(lambda dt: on_complete(path), 0)
+                    def _deliver_and_cleanup(p):
+                        try:
+                            on_complete(p)
+                        finally:
+                            if p and os.path.exists(p):
+                                try:
+                                    os.remove(p)
+                                except Exception:
+                                    pass
+                    Clock.schedule_once(lambda dt: _deliver_and_cleanup(path), 0)
                 else:
                     Clock.schedule_once(lambda dt: on_complete(None), 0)
             except Exception:
@@ -208,6 +217,27 @@ def _take_picture_android(on_complete):
         PythonActivity.mActivity.startActivityForResult(intent, REQUEST_IMAGE)
     except Exception:
         Clock.schedule_once(lambda dt: on_complete(None), 0)
+
+
+def _get_android_display_rotation():
+    """
+    Get display rotation on Android (0, 90, 180, 270).
+    Surface.ROTATION_0=0, ROTATION_90=1, ROTATION_180=2, ROTATION_270=3.
+    Returns degrees for preview rotation.
+    """
+    if platform != "android":
+        return 0
+    try:
+        from jnius import autoclass
+        PythonActivity = autoclass("org.kivy.android.PythonActivity")
+        Context = autoclass("android.content.Context")
+        ctx = PythonActivity.mActivity
+        wm = ctx.getSystemService(Context.WINDOW_SERVICE)
+        display = wm.getDefaultDisplay()
+        rotation = display.getRotation()
+        return {0: -90, 1: 0, 2: 90, 3: 180}.get(rotation, -90)
+    except Exception:
+        return -90
 
 
 def _has_qr_decoder():
@@ -745,6 +775,7 @@ class QRScanScreen(MDScreen):
         self._camera = None
         self._capture = None
         self._preview_image = None
+        self._camera_rotation = -90
 
     def on_enter(self):
         """Start camera and scanning loop."""
@@ -771,6 +802,14 @@ class QRScanScreen(MDScreen):
                 raise RuntimeError("Camera not opened")
             self._capture.set(cv2.CAP_PROP_FRAME_WIDTH, 640)
             self._capture.set(cv2.CAP_PROP_FRAME_HEIGHT, 480)
+            actual_w = int(self._capture.get(cv2.CAP_PROP_FRAME_WIDTH))
+            actual_h = int(self._capture.get(cv2.CAP_PROP_FRAME_HEIGHT))
+            if actual_w < 100 or actual_h < 100:
+                self._capture.set(cv2.CAP_PROP_FRAME_WIDTH, 320)
+                self._capture.set(cv2.CAP_PROP_FRAME_HEIGHT, 240)
+                actual_w = int(self._capture.get(cv2.CAP_PROP_FRAME_WIDTH))
+                actual_h = int(self._capture.get(cv2.CAP_PROP_FRAME_HEIGHT))
+            self._camera_rotation = _get_android_display_rotation()
             from kivy.uix.image import Image
             self._preview_image = Image(allow_stretch=True, keep_ratio=False, size_hint=(1, 1))
             self.ids.camera_container.clear_widgets()
@@ -789,6 +828,7 @@ class QRScanScreen(MDScreen):
     def _start_camera_kivy(self):
         """Fallback: Kivy Camera widget."""
         try:
+            self._camera_rotation = _get_android_display_rotation()
             self._camera = Camera(
                 index=0,
                 resolution=(640, 480),
@@ -797,7 +837,7 @@ class QRScanScreen(MDScreen):
                 keep_ratio=False,
                 size_hint=(1, 1),
             )
-            self._camera.rotation = -90
+            self._camera.rotation = self._camera_rotation
             self.ids.camera_container.clear_widgets()
             self.ids.camera_container.add_widget(self._camera)
             self._scan_event = Clock.schedule_interval(self._scan_frame, 1 / 15)
@@ -862,7 +902,13 @@ class QRScanScreen(MDScreen):
             ret, frame = cap.read()
             if not ret or frame is None:
                 return
-            frame = cv2.rotate(frame, cv2.ROTATE_90_COUNTERCLOCKWISE)
+            rot = getattr(self, "_camera_rotation", -90)
+            if rot == -90:
+                frame = cv2.rotate(frame, cv2.ROTATE_90_COUNTERCLOCKWISE)
+            elif rot == 90:
+                frame = cv2.rotate(frame, cv2.ROTATE_90_CLOCKWISE)
+            elif rot == 180:
+                frame = cv2.rotate(frame, cv2.ROTATE_180)
             buf = cv2.flip(frame, 0)
             buf = cv2.cvtColor(buf, cv2.COLOR_BGR2RGB)
             buf = buf.tobytes()
@@ -904,20 +950,24 @@ class QRScanScreen(MDScreen):
                                 frame_bgr = cv2.cvtColor(arr, cv2.COLOR_YUV2BGR_NV21)
                         except Exception:
                             pass
-            if frame_bgr is None and cam.texture and cam.texture.pixels:
+            if frame_bgr is None and cam.texture and getattr(cam.texture, "pixels", None):
                 tex = cam.texture
                 w, h = tex.size
                 buf = tex.pixels
                 if buf and w >= 100 and h >= 100:
-                    arr = np.frombuffer(buf, dtype=np.uint8)
-                    if arr.size == w * h * 4:
-                        arr = arr.reshape((h, w, 4))
-                        arr = np.flipud(arr)
-                        frame_bgr = cv2.cvtColor(arr, cv2.COLOR_RGBA2BGR)
-                    elif arr.size == w * h * 3:
-                        arr = arr.reshape((h, w, 3))
-                        arr = np.flipud(arr)
-                        frame_bgr = cv2.cvtColor(arr, cv2.COLOR_RGB2BGR)
+                    try:
+                        arr = np.frombuffer(buf, dtype=np.uint8)
+                        n_pixels = w * h
+                        if arr.size >= n_pixels * 4:
+                            arr = arr[: n_pixels * 4].reshape((h, w, 4))
+                            arr = np.flipud(arr)
+                            frame_bgr = cv2.cvtColor(arr, cv2.COLOR_RGBA2BGR)
+                        elif arr.size >= n_pixels * 3:
+                            arr = arr[: n_pixels * 3].reshape((h, w, 3))
+                            arr = np.flipud(arr)
+                            frame_bgr = cv2.cvtColor(arr, cv2.COLOR_RGB2BGR)
+                    except Exception:
+                        pass
             if frame_bgr is not None:
                 data = _decode_qr_from_frame(frame_bgr)
                 if data and data.strip().lower().startswith("otpauth://"):
