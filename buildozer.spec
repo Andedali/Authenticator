@@ -38,6 +38,9 @@ fullscreen = 0
 # (list) Permissions
 android.permissions = INTERNET,CAMERA
 
+# (str) Extra xml to write directly inside the <manifest> element of AndroidManifest.xml
+android.extra_manifest_xml = %(source.dir)s/android_manifest_features.xml
+
 # (int) Target Android API, should be as high as possible.
 android.api = 33
 

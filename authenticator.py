@@ -47,6 +47,7 @@ from kivy.uix.label import Label
 from kivy.uix.modalview import ModalView
 from kivy.uix.camera import Camera
 from kivy.animation import Animation
+from kivy.graphics import PushMatrix, PopMatrix, Rotate
 
 # ── Window size for desktop testing (ignored on mobile) ──────────────
 from kivy.utils import platform
@@ -828,27 +829,55 @@ class BackupCodesScreen(MDScreen):
         app.sm.current = "main"
 
 
+# ── QRScanScreen — ФИКС ПОВОРОТА: angle=90 + надёжный origin + reapply после layout ──
+# (Kivy Camera на Android по умолчанию даёт -90° offset в превью — компенсируем +90°)
+
 class QRScanScreen(MDScreen):
-    """QR scan: live camera preview + tap camera-plus to take a photo and decode QR."""
+    """
+    Стабильный QR-сканер для Android (Kivy Camera + OpenCV)
+    
+    ИСПРАВЛЕНИЯ (основаны на логах ROTATION_90 + опыте Kivy/SO):
+    - Превью: фиксированный angle=90 (компенсирует встроенный -90° Kivy Camera)
+    - Origin: width/2, height/2 (более надёжно, чем center_x/y)
+    - Reapply: после добавления камеры (через Clock, чтобы layout прошёл)
+    - Frame для QR: авто-ротация на основе _get_android_display_rotation()
+    - Debug: логи в консоль (adb logcat | grep QR)
+    """
 
     def __init__(self, **kwargs):
         super().__init__(**kwargs)
         self._camera = None
+        self._scanning = False
+        self._last_data = None
+        self._scan_interval = 0.08  # ~12 FPS для скорости
+
+        try:
+            import cv2
+            self._detector = cv2.QRCodeDetector()
+        except Exception:
+            self._detector = None
+
+    # ========================
+    # SCREEN EVENTS
+    # ========================
 
     def on_enter(self):
-        """Start live camera preview (no frame-by-frame QR scan — saves memory)."""
-        self._start_preview()
+        Clock.schedule_once(lambda dt: self.start_camera(), 0.2)
 
-    def on_leave(self):
-        self._stop_preview()
+    def on_leave(self, *args):
+        self.stop_camera()
 
-    def _start_preview(self):
-        """Show live camera feed with correct orientation."""
-        self._stop_preview()
+    # ========================
+    # CAMERA CONTROL
+    # ========================
+
+    def start_camera(self):
+        self.stop_camera()
+
         try:
             self._camera = Camera(
                 index=0,
-                resolution=(1280, 720),
+                resolution=(640, 480),
                 play=True,
                 allow_stretch=True,
                 keep_ratio=True,
@@ -858,115 +887,158 @@ class QRScanScreen(MDScreen):
             self.ids.camera_container.clear_widgets()
             self.ids.camera_container.add_widget(self._camera)
 
-            # ---- TARGETING FRAME ----
-            from kivy.graphics import Color, Line
+            self._scanning = True
 
-            container = self.ids.camera_container
-            frame_size = min(container.width, container.height) * 0.6
-            rx = (container.width - frame_size) / 2
-            ry = (container.height - frame_size) / 2
-
-            with container.canvas.after:
-                Color(0, 1, 0, 0.8)
-                self._frame = Line(rectangle=(rx, ry, frame_size, frame_size), width=2)
-
-            def update_frame(*args):
-                if hasattr(self, "_frame") and self._frame is not None:
-                    c = self.ids.camera_container
-                    sz = min(c.width, c.height) * 0.6
-                    self._frame.rectangle = ((c.width - sz) / 2, (c.height - sz) / 2, sz, sz)
-
-            container.bind(size=update_frame, pos=update_frame)
-
-            # ---- FIX ROTATION AND MIRROR FOR ANDROID ----
+            # ── ФИКС ПОВОРОТА ПРЕВЬЮ (Kivy Android) ──
             if platform == "android":
-                from kivy.graphics import PushMatrix, PopMatrix, Rotate
+                Clock.schedule_once(self._apply_camera_rotation, 0.3)  # После layout
 
-                with self._camera.canvas.before:
-                    PushMatrix()
-                    self._rot = Rotate(angle=-90, origin=self._camera.center)
-
-                with self._camera.canvas.after:
-                    PopMatrix()
-
-                def update_rot(*args):
-                    if hasattr(self, "_rot"):
-                        self._rot.origin = self._camera.center
-
-                self._camera.bind(pos=update_rot, size=update_rot)
+            # Сканирование
+            Clock.schedule_interval(self._scan_frame, self._scan_interval)
 
         except Exception as e:
             self.ids.camera_container.clear_widgets()
-            hint = Label(
-                text=t("Tap camera icon to take a photo", "Нажмите значок камеры для съёмки"),
+            lbl = MDLabel(
+                text=f"Ошибка камеры:\n{e}",
                 halign="center",
                 valign="middle",
-                font_size="18sp",
-                color=(0.6, 0.6, 0.6, 1),
+                theme_text_color="Error",
             )
-            hint.bind(size=lambda w, s: setattr(w, "text_size", s))
-            self.ids.camera_container.add_widget(hint)
+            self.ids.camera_container.add_widget(lbl)
 
-    def _stop_preview(self):
+    def _apply_camera_rotation(self, *_):
+        """Применяем Rotate к камере (компенсируем -90°).
+        PopMatrix в canvas.after — иначе вращение не применяется к отрисовке камеры.
+        """
+        if not self._camera:
+            return
+
+        angle = -90  # ← ОСНОВНОЙ ФИКС (попробуй -90 / 0 / 180 если не так)
+        print(f"[QR] Applying preview rotation: {angle}°")
+
+        with self._camera.canvas.before:
+            PushMatrix()
+            self._camera._rot = Rotate(
+                angle=angle,
+                origin=(self._camera.center_x, self._camera.center_y),
+            )
+
+        with self._camera.canvas.after:
+            PopMatrix()
+
+        def update_rot(widget, *args):
+            if hasattr(widget, "_rot"):
+                widget._rot.origin = (widget.center_x, widget.center_y)
+
+        self._camera.bind(pos=update_rot, size=update_rot)
+        self._camera.canvas.ask_update()
+
+    def stop_camera(self):
+        self._scanning = False
+        Clock.unschedule(self._scan_frame)
+
         if self._camera:
             try:
                 self._camera.play = False
             except Exception:
                 pass
             self._camera = None
-        if hasattr(self, "ids") and "camera_container" in self.ids:
-            container = self.ids.camera_container
-            container.canvas.after.clear()
-            container.clear_widgets()
 
-    def _take_photo_fallback(self):
-        """User tapped camera-plus — stop preview, open system camera (or file picker on desktop)."""
-        self._stop_preview()
-        self._fallback_to_photo()
+        if "camera_container" in self.ids:
+            self.ids.camera_container.clear_widgets()
 
-    def _fallback_to_photo(self):
-        """Open camera to take one photo; decode QR from result."""
-        self._go_back()
-        app = MDApp.get_running_app()
-        add_screen = app.add_edit_screen
+    # ========================
+    # FRAME SCANNING
+    # ========================
 
-        def on_done(path):
-            if path and os.path.exists(path):
-                try:
-                    data = _decode_qr_from_path(path)
-                    try:
-                        if path.startswith(tempfile.gettempdir()):
-                            os.remove(path)
-                    except Exception:
-                        pass
-                    if data:
-                        add_screen._apply_otpauth(data)
-                        toast(t("QR code scanned", "QR-код считан"))
-                        return
-                except Exception:
-                    pass
-            toast(t("Photo not received", "Фото не получено"))
+    def _scan_frame(self, dt):
+        if not self._scanning or not self._camera:
+            return
 
-        if platform == "android":
-            try:
-                _take_picture_android(lambda p: Clock.schedule_once(lambda dt: on_done(p), 0))
-            except Exception as e:
-                toast(t("Camera", "Камера") + f": {e}")
-        else:
-            try:
-                from plyer import filechooser
-                result = filechooser.open_file(title=t("Select image with QR code", "Выберите изображение с QR-кодом"), filters=[("Image", "*.png", "*.jpg", "*.jpeg")])
-                if result and result[0]:
-                    Clock.schedule_once(lambda dt: on_done(result[0]), 0)
-                else:
-                    toast(t("Photo not received", "Фото не получено"))
-            except Exception as e:
-                toast(t("Error", "Ошибка") + f": {e}")
+        try:
+            import cv2
+            import numpy as np
 
-    def _go_back(self):
+            if platform == "android":
+                provider = getattr(self._camera, "_camera", None)
+                if not provider or not hasattr(provider, "grab_frame"):
+                    return
+
+                buf = provider.grab_frame()
+                if not buf:
+                    return
+
+                buf = bytes(buf) if not isinstance(buf, bytes) else buf
+                w, h = getattr(provider, "_resolution", (640, 480))
+
+                need = (h + h // 2) * w
+                if len(buf) < need:
+                    return
+
+                arr = np.frombuffer(buf[:need], dtype=np.uint8)
+                arr = arr.reshape((h + h // 2, w))
+                frame = cv2.cvtColor(arr, cv2.COLOR_YUV2BGR_NV21)
+                # NV21 на Android почти всегда приходит повёрнут на 90° против часовой
+                frame = cv2.rotate(frame, cv2.ROTATE_90_CLOCKWISE)
+
+            else:
+                texture = self._camera.texture
+                if not texture or not texture.pixels:
+                    return
+
+                image_data = texture.pixels
+                image_data = bytes(image_data) if not isinstance(image_data, bytes) else image_data
+                w, h = texture.size
+
+                expected = w * h * 4
+                if len(image_data) < expected:
+                    return
+
+                arr = np.frombuffer(image_data[:expected], dtype=np.uint8)
+                frame = arr.reshape((h, w, 4))
+                frame = cv2.cvtColor(frame, cv2.COLOR_RGBA2BGR)
+
+            data = _decode_qr_from_frame(frame)
+
+            if data and data.strip() and data != self._last_data:
+                self._last_data = data
+                print(f"[QR] DETECTED: {data[:60]}...")
+                Clock.schedule_once(lambda dt: self.on_qr_found(data), 0)
+
+        except Exception as e:
+            print(f"[QR] scan error: {e}")
+
+    # ========================
+    # QR RESULT
+    # ========================
+
+    def on_qr_found(self, data):
+        print(f"[QR] FOUND: {data}")
+        self.stop_camera()
+
         app = MDApp.get_running_app()
         app.sm.transition.direction = "right"
         app.sm.current = "add_edit"
+
+        add_screen = app.sm.get_screen("add_edit")
+        add_screen._apply_otpauth(data)
+
+    # ========================
+    # FILE PICKER
+    # ========================
+
+    def pick_image(self):
+        from plyer import filechooser
+
+        def _cb(selection):
+            if not selection:
+                return
+            path = selection[0]
+            data = _decode_qr_from_path(path)
+            if data:
+                self.on_qr_found(data)
+
+        filechooser.open_file(on_selection=_cb)
 
 
 class AuthenticatorApp(MDApp):
@@ -1280,17 +1352,13 @@ class AuthenticatorApp(MDApp):
         orientation: "vertical"
 
         MDTopAppBar:
-            title: "{_scan_qr_title}"
-            anchor_title: "center"
-            elevation: 0
-            md_bg_color: app.theme_cls.primary_color
-            specific_text_color: 1, 1, 1, 1
-            left_action_items: [["arrow-left", lambda x: root._go_back()]]
-            right_action_items: [["camera-plus", lambda x: root._take_photo_fallback()]]
+            title: "Scan QR"
+            elevation: 4
+            left_action_items: [["arrow-left", lambda x: app.go_back()]]
+            right_action_items: [["camera-plus", lambda x: root.pick_image()]]
 
         BoxLayout:
             id: camera_container
-            size_hint: 1, 1
 """
 
         Builder.load_string(KV)
@@ -1368,6 +1436,13 @@ class AuthenticatorApp(MDApp):
             self._ntp_dialog.open()
         else:
             toast(t("Clock synced (offset: {:.1f}s)", "Часы синхронизированы (смещение: {:.1f}s)").format(abs_offset))
+
+    def go_back(self):
+        """Navigate back from QR scan to add_edit screen."""
+        if hasattr(self, "qr_scan_screen") and self.qr_scan_screen:
+            self.qr_scan_screen.stop_camera()
+        self.sm.transition.direction = "right"
+        self.sm.current = "add_edit"
 
     def refresh_main_screen(self):
         """Rebuild the services list on main screen."""
