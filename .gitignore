@@ -16,3 +16,7 @@ media/
 services.json
 .env
 .env.local
+
+#buildozer
+bin/
+.buildozer/
