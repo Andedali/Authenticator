@@ -46,7 +46,6 @@ from kivymd.uix.progressbar import MDProgressBar
 from kivy.uix.label import Label
 from kivy.uix.modalview import ModalView
 from kivy.uix.camera import Camera
-from kivy.graphics.texture import Texture
 from kivy.animation import Animation
 
 # ── Window size for desktop testing (ignored on mobile) ──────────────
@@ -97,7 +96,28 @@ from PIL import Image as _PILImage
 
 # ── QR scan dependencies (pyzbar or opencv fallback) ──
 def _decode_qr_from_path(path):
-    """Decode QR from image path. Returns str or None. Tries pyzbar, then cv2."""
+    """Decode QR from image path with preprocessing."""
+    try:
+        import cv2
+
+        img = cv2.imread(path)
+        if img is None:
+            return None
+
+        gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+
+        # Increase contrast
+        gray = cv2.equalizeHist(gray)
+
+        detector = cv2.QRCodeDetector()
+        data, _, _ = detector.detectAndDecode(gray)
+
+        if data:
+            return data
+
+    except Exception:
+        pass
+
     try:
         from pyzbar import pyzbar
         img = _PILImage.open(path).convert("RGB")
@@ -106,27 +126,21 @@ def _decode_qr_from_path(path):
             return decoded[0].data.decode("utf-8", errors="ignore")
     except Exception:
         pass
-    try:
-        import cv2
-        img = cv2.imread(path)
-        if img is not None:
-            data, _, _ = cv2.QRCodeDetector().detectAndDecode(img)
-            if data:
-                return data
-    except Exception:
-        pass
+
     return None
 
 
 def _decode_qr_from_frame(frame_bgr):
-    """Decode QR from numpy array (BGR, from OpenCV). Returns str or None."""
+    """Decode QR from numpy array (BGR)."""
     try:
         import cv2
-        data, _, _ = cv2.QRCodeDetector().detectAndDecode(frame_bgr)
+        detector = cv2.QRCodeDetector()
+        data, _, _ = detector.detectAndDecode(frame_bgr)
         if data:
             return data
     except Exception:
         pass
+
     try:
         import cv2
         from pyzbar import pyzbar
@@ -137,13 +151,14 @@ def _decode_qr_from_frame(frame_bgr):
             return decoded[0].data.decode("utf-8", errors="ignore")
     except Exception:
         pass
+
     return None
 
 
 def _take_picture_android(on_complete):
     """
-    Launch Android camera without passing file URI (avoids FileUriExposedException).
-    Camera app saves to its location; we get content URI in result and copy to temp file.
+    Launch Android camera. On API 29+ uses MediaStore to get content URI and EXTRA_OUTPUT
+    so the camera writes to our URI; on older or fallback reads getData() or thumbnail bitmap.
     """
     try:
         import android.activity
@@ -152,65 +167,112 @@ def _take_picture_android(on_complete):
         Intent = autoclass("android.content.Intent")
         MediaStore = autoclass("android.provider.MediaStore")
         PythonActivity = autoclass("org.kivy.android.PythonActivity")
+        Build = autoclass("android.os.Build")
+        Bitmap = autoclass("android.graphics.Bitmap")
+        ContentValues = autoclass("android.content.ContentValues")
+        Activity = autoclass("android.app.Activity")
 
-        intent = Intent(MediaStore.ACTION_IMAGE_CAPTURE)
-        # Do NOT set EXTRA_OUTPUT — avoids FileUriExposedException; we get URI or thumbnail in result
-
+        context = PythonActivity.mActivity
+        resolver = context.getContentResolver()
         REQUEST_IMAGE = 0x124
+        intent = Intent(MediaStore.ACTION_IMAGE_CAPTURE)
+
+        output_uri = None
+        if Build.VERSION.SDK_INT >= 29:
+            try:
+                values = ContentValues()
+                values.put(MediaStore.MediaColumns.DISPLAY_NAME, "qr_capture_" + str(int(time.time())) + ".jpg")
+                values.put(MediaStore.MediaColumns.MIME_TYPE, "image/jpeg")
+                try:
+                    MediaColumns = autoclass("android.provider.MediaStore$MediaColumns")
+                    values.put(MediaColumns.RELATIVE_PATH, "Pictures/Authenticator")
+                except Exception:
+                    try:
+                        values.put(MediaStore.MediaColumns.RELATIVE_PATH, "Pictures/Authenticator")
+                    except Exception:
+                        values.put("relative_path", "Pictures/Authenticator")
+                output_uri = resolver.insert(MediaStore.Images.Media.EXTERNAL_CONTENT_URI, values)
+                if output_uri is not None:
+                    intent.putExtra(MediaStore.EXTRA_OUTPUT, output_uri)
+                    intent.addFlags(Intent.FLAG_GRANT_WRITE_URI_PERMISSION)
+                    intent.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+            except Exception:
+                output_uri = None
+
+        def read_uri_to_temp(uri):
+            path = None
+            try:
+                inp = resolver.openInputStream(uri)
+                fd, path = tempfile.mkstemp(suffix=".jpg")
+                try:
+                    with os.fdopen(fd, "wb") as f:
+                        buf = inp.read()
+                        if buf:
+                            f.write(buf if isinstance(buf, bytes) else bytes(list(buf)))
+                finally:
+                    try:
+                        inp.close()
+                    except Exception:
+                        pass
+            except Exception:
+                pass
+            return path
 
         def on_result(request_code, result_code, intent_obj):
             if request_code != REQUEST_IMAGE:
                 return
             android.activity.unbind(on_activity_result=on_result)
-            if result_code != -1 or intent_obj is None:  # -1 = RESULT_OK
-                Clock.schedule_once(lambda dt: on_complete(None), 0)
-                return
+            result_ok = getattr(Activity, "RESULT_OK", -1)
+            is_ok = result_code == result_ok or result_code == -1
             path = None
             try:
-                context = PythonActivity.mActivity
-                uri = intent_obj.getData()
-                if uri is not None:
-                    resolver = context.getContentResolver()
-                    inp = resolver.openInputStream(uri)
-                    fd, path = tempfile.mkstemp(suffix=".jpg")
-                    try:
-                        with os.fdopen(fd, "wb") as f:
-                            buf = inp.read()
-                            if buf:
-                                f.write(buf if isinstance(buf, bytes) else buf.encode())
-                    finally:
+                if output_uri is not None and is_ok:
+                    path = read_uri_to_temp(output_uri)
+                    if path:
                         try:
-                            inp.close()
+                            resolver.delete(output_uri, None, None)
                         except Exception:
                             pass
-                else:
-                    extras = intent_obj.getExtras()
-                    if extras is not None:
-                        bitmap = extras.get("data")
-                        if bitmap is not None:
-                            fd, path = tempfile.mkstemp(suffix=".jpg")
+                if path is None and intent_obj is not None:
+                    uri = intent_obj.getData()
+                    if uri is not None:
+                        path = read_uri_to_temp(uri)
+                if path is None and intent_obj is not None:
+                    bitmap = None
+                    try:
+                        if Build.VERSION.SDK_INT >= 33:
+                            bitmap = intent_obj.getParcelableExtra("data", Bitmap)
+                        else:
+                            bitmap = intent_obj.getParcelableExtra("data")
+                    except Exception:
+                        pass
+                    if bitmap is None:
+                        extras = intent_obj.getExtras()
+                        if extras is not None:
+                            bitmap = extras.get("data")
+                    if bitmap is not None:
+                        fd, path = tempfile.mkstemp(suffix=".jpg")
+                        try:
                             out = os.fdopen(fd, "wb")
                             ByteArrayOutputStream = autoclass("java.io.ByteArrayOutputStream")
                             bos = ByteArrayOutputStream()
                             JPEG = autoclass("android.graphics.Bitmap$CompressFormat").JPEG
-                            bitmap.compress(JPEG, 90, bos)
+                            bitmap.compress(JPEG, 95, bos)
                             arr = bos.toByteArray()
                             out.write(arr if isinstance(arr, bytes) else bytes(list(arr)))
                             out.close()
-                if path:
-                    def _deliver_and_cleanup(p):
-                        try:
-                            on_complete(p)
-                        finally:
-                            if p and os.path.exists(p):
-                                try:
-                                    os.remove(p)
-                                except Exception:
-                                    pass
-                    Clock.schedule_once(lambda dt: _deliver_and_cleanup(path), 0)
-                else:
-                    Clock.schedule_once(lambda dt: on_complete(None), 0)
-            except Exception:
+                        except Exception:
+                            try:
+                                os.close(fd)
+                            except Exception:
+                                pass
+                            try:
+                                os.remove(path)
+                            except Exception:
+                                pass
+                            path = None
+                Clock.schedule_once(lambda dt: on_complete(path), 0)
+            except Exception as e:
                 Clock.schedule_once(lambda dt: on_complete(None), 0)
 
         android.activity.bind(on_activity_result=on_result)
@@ -235,9 +297,9 @@ def _get_android_display_rotation():
         wm = ctx.getSystemService(Context.WINDOW_SERVICE)
         display = wm.getDefaultDisplay()
         rotation = display.getRotation()
-        return {0: -90, 1: 0, 2: 90, 3: 180}.get(rotation, -90)
+        return {0: 90, 1: 0, 2: -90, 3: 180}.get(rotation, 0)
     except Exception:
-        return -90
+        return 0
 
 
 def _has_qr_decoder():
@@ -767,86 +829,103 @@ class BackupCodesScreen(MDScreen):
 
 
 class QRScanScreen(MDScreen):
-    """Full-screen live QR scanner. On QR found: fill add_edit fields and close."""
+    """QR scan: live camera preview + tap camera-plus to take a photo and decode QR."""
 
     def __init__(self, **kwargs):
         super().__init__(**kwargs)
-        self._scan_event = None
         self._camera = None
-        self._capture = None
-        self._preview_image = None
-        self._camera_rotation = -90
 
     def on_enter(self):
-        """Start camera and scanning loop."""
-        self._start_camera()
+        """Start live camera preview (no frame-by-frame QR scan — saves memory)."""
+        self._start_preview()
 
     def on_leave(self):
-        """Stop camera when leaving screen."""
-        self._stop_camera()
+        self._stop_preview()
 
-    def _start_camera(self):
-        self._stop_camera()
-        if platform == "android":
-            self._start_camera_opencv()
-        else:
-            self._start_camera_kivy()
-
-    def _start_camera_opencv(self):
-        """Use OpenCV VideoCapture for full control: fullscreen, rotation, QR frames."""
+    def _start_preview(self):
+        """Show live camera feed with correct orientation."""
+        self._stop_preview()
         try:
-            import cv2
-            self._capture = cv2.VideoCapture(0)
-            if not self._capture.isOpened():
-                self._capture = None
-                raise RuntimeError("Camera not opened")
-            self._capture.set(cv2.CAP_PROP_FRAME_WIDTH, 640)
-            self._capture.set(cv2.CAP_PROP_FRAME_HEIGHT, 480)
-            actual_w = int(self._capture.get(cv2.CAP_PROP_FRAME_WIDTH))
-            actual_h = int(self._capture.get(cv2.CAP_PROP_FRAME_HEIGHT))
-            if actual_w < 100 or actual_h < 100:
-                self._capture.set(cv2.CAP_PROP_FRAME_WIDTH, 320)
-                self._capture.set(cv2.CAP_PROP_FRAME_HEIGHT, 240)
-                actual_w = int(self._capture.get(cv2.CAP_PROP_FRAME_WIDTH))
-                actual_h = int(self._capture.get(cv2.CAP_PROP_FRAME_HEIGHT))
-            self._camera_rotation = _get_android_display_rotation()
-            from kivy.uix.image import Image
-            self._preview_image = Image(allow_stretch=True, keep_ratio=False, size_hint=(1, 1))
-            self.ids.camera_container.clear_widgets()
-            self.ids.camera_container.add_widget(self._preview_image)
-            self._scan_event = Clock.schedule_interval(self._scan_frame_opencv, 1 / 15)
-        except Exception as e:
-            if self._capture:
-                try:
-                    self._capture.release()
-                except Exception:
-                    pass
-                self._capture = None
-            toast(t("Camera error", "Ошибка камеры") + f": {e}")
-            self._start_camera_kivy()
-
-    def _start_camera_kivy(self):
-        """Fallback: Kivy Camera widget."""
-        try:
-            self._camera_rotation = _get_android_display_rotation()
             self._camera = Camera(
                 index=0,
-                resolution=(640, 480),
+                resolution=(1280, 720),
                 play=True,
                 allow_stretch=True,
-                keep_ratio=False,
+                keep_ratio=True,
                 size_hint=(1, 1),
             )
-            self._camera.rotation = self._camera_rotation
+
             self.ids.camera_container.clear_widgets()
             self.ids.camera_container.add_widget(self._camera)
-            self._scan_event = Clock.schedule_interval(self._scan_frame, 1 / 15)
+
+            # ---- TARGETING FRAME ----
+            from kivy.graphics import Color, Line
+
+            container = self.ids.camera_container
+            frame_size = min(container.width, container.height) * 0.6
+            rx = (container.width - frame_size) / 2
+            ry = (container.height - frame_size) / 2
+
+            with container.canvas.after:
+                Color(0, 1, 0, 0.8)
+                self._frame = Line(rectangle=(rx, ry, frame_size, frame_size), width=2)
+
+            def update_frame(*args):
+                if hasattr(self, "_frame") and self._frame is not None:
+                    c = self.ids.camera_container
+                    sz = min(c.width, c.height) * 0.6
+                    self._frame.rectangle = ((c.width - sz) / 2, (c.height - sz) / 2, sz, sz)
+
+            container.bind(size=update_frame, pos=update_frame)
+
+            # ---- FIX ROTATION AND MIRROR FOR ANDROID ----
+            if platform == "android":
+                from kivy.graphics import PushMatrix, PopMatrix, Rotate
+
+                with self._camera.canvas.before:
+                    PushMatrix()
+                    self._rot = Rotate(angle=-90, origin=self._camera.center)
+
+                with self._camera.canvas.after:
+                    PopMatrix()
+
+                def update_rot(*args):
+                    if hasattr(self, "_rot"):
+                        self._rot.origin = self._camera.center
+
+                self._camera.bind(pos=update_rot, size=update_rot)
+
         except Exception as e:
-            toast(t("Camera error", "Ошибка камеры") + f": {e}")
-            self._fallback_to_photo()
+            self.ids.camera_container.clear_widgets()
+            hint = Label(
+                text=t("Tap camera icon to take a photo", "Нажмите значок камеры для съёмки"),
+                halign="center",
+                valign="middle",
+                font_size="18sp",
+                color=(0.6, 0.6, 0.6, 1),
+            )
+            hint.bind(size=lambda w, s: setattr(w, "text_size", s))
+            self.ids.camera_container.add_widget(hint)
+
+    def _stop_preview(self):
+        if self._camera:
+            try:
+                self._camera.play = False
+            except Exception:
+                pass
+            self._camera = None
+        if hasattr(self, "ids") and "camera_container" in self.ids:
+            container = self.ids.camera_container
+            container.canvas.after.clear()
+            container.clear_widgets()
+
+    def _take_photo_fallback(self):
+        """User tapped camera-plus — stop preview, open system camera (or file picker on desktop)."""
+        self._stop_preview()
+        self._fallback_to_photo()
 
     def _fallback_to_photo(self):
-        """Fallback: take single photo via system camera when live preview fails."""
+        """Open camera to take one photo; decode QR from result."""
         self._go_back()
         app = MDApp.get_running_app()
         add_screen = app.add_edit_screen
@@ -856,7 +935,8 @@ class QRScanScreen(MDScreen):
                 try:
                     data = _decode_qr_from_path(path)
                     try:
-                        os.remove(path)
+                        if path.startswith(tempfile.gettempdir()):
+                            os.remove(path)
                     except Exception:
                         pass
                     if data:
@@ -867,121 +947,23 @@ class QRScanScreen(MDScreen):
                     pass
             toast(t("Photo not received", "Фото не получено"))
 
-        try:
-            _take_picture_android(lambda p: Clock.schedule_once(lambda dt: on_done(p), 0))
-        except Exception as e:
-            toast(t("Camera", "Камера") + f": {e}")
-
-    def _stop_camera(self):
-        if self._scan_event:
-            self._scan_event.cancel()
-            self._scan_event = None
-        if self._capture:
+        if platform == "android":
             try:
-                self._capture.release()
-            except Exception:
-                pass
-            self._capture = None
-        self._preview_image = None
-        if self._camera:
+                _take_picture_android(lambda p: Clock.schedule_once(lambda dt: on_done(p), 0))
+            except Exception as e:
+                toast(t("Camera", "Камера") + f": {e}")
+        else:
             try:
-                self._camera.play = False
-            except Exception:
-                pass
-            self._camera = None
-        self.ids.camera_container.clear_widgets()
-
-    def _scan_frame_opencv(self, dt):
-        """Scan frame from cv2.VideoCapture, update preview, decode QR."""
-        cap = self._capture
-        img_widget = self._preview_image
-        if not cap or not cap.isOpened() or not img_widget:
-            return
-        try:
-            import cv2
-            ret, frame = cap.read()
-            if not ret or frame is None:
-                return
-            rot = getattr(self, "_camera_rotation", -90)
-            if rot == -90:
-                frame = cv2.rotate(frame, cv2.ROTATE_90_COUNTERCLOCKWISE)
-            elif rot == 90:
-                frame = cv2.rotate(frame, cv2.ROTATE_90_CLOCKWISE)
-            elif rot == 180:
-                frame = cv2.rotate(frame, cv2.ROTATE_180)
-            buf = cv2.flip(frame, 0)
-            buf = cv2.cvtColor(buf, cv2.COLOR_BGR2RGB)
-            buf = buf.tobytes()
-            h, w = frame.shape[:2]
-            tex = Texture.create(size=(w, h), colorfmt="rgb")
-            tex.blit_buffer(buf, colorfmt="rgb", bufferfmt="ubyte")
-            img_widget.texture = tex
-            data = _decode_qr_from_frame(frame)
-            if data and data.strip().lower().startswith("otpauth://"):
-                self._stop_camera()
-                app = MDApp.get_running_app()
-                add_screen = app.add_edit_screen
-                add_screen._apply_otpauth(data)
-                toast(t("QR code scanned", "QR-код считан"))
-                self._go_back()
-        except Exception:
-            pass
-
-    def _scan_frame(self, dt):
-        cam = self._camera
-        if not cam:
-            return
-        frame_bgr = None
-        try:
-            import cv2
-            provider = getattr(cam, "_camera", None)
-            if provider is not None:
-                if hasattr(provider, "read_frame"):
-                    frame_bgr = provider.read_frame()
-                elif hasattr(provider, "grab_frame") and hasattr(provider, "decode_frame"):
-                    buf = provider.grab_frame()
-                    if buf is not None:
-                        try:
-                            buf = buf if isinstance(buf, bytes) else bytes(buf)
-                            w, h = getattr(provider, "_resolution", (640, 480))
-                            arr = np.frombuffer(buf, dtype=np.uint8)
-                            if arr.size >= (h + h // 2) * w:
-                                arr = arr[:(h + h // 2) * w].reshape((h + h // 2, w))
-                                frame_bgr = cv2.cvtColor(arr, cv2.COLOR_YUV2BGR_NV21)
-                        except Exception:
-                            pass
-            if frame_bgr is None and cam.texture and getattr(cam.texture, "pixels", None):
-                tex = cam.texture
-                w, h = tex.size
-                buf = tex.pixels
-                if buf and w >= 100 and h >= 100:
-                    try:
-                        arr = np.frombuffer(buf, dtype=np.uint8)
-                        n_pixels = w * h
-                        if arr.size >= n_pixels * 4:
-                            arr = arr[: n_pixels * 4].reshape((h, w, 4))
-                            arr = np.flipud(arr)
-                            frame_bgr = cv2.cvtColor(arr, cv2.COLOR_RGBA2BGR)
-                        elif arr.size >= n_pixels * 3:
-                            arr = arr[: n_pixels * 3].reshape((h, w, 3))
-                            arr = np.flipud(arr)
-                            frame_bgr = cv2.cvtColor(arr, cv2.COLOR_RGB2BGR)
-                    except Exception:
-                        pass
-            if frame_bgr is not None:
-                data = _decode_qr_from_frame(frame_bgr)
-                if data and data.strip().lower().startswith("otpauth://"):
-                    self._stop_camera()
-                    app = MDApp.get_running_app()
-                    add_screen = app.add_edit_screen
-                    add_screen._apply_otpauth(data)
-                    toast(t("QR code scanned", "QR-код считан"))
-                    self._go_back()
-        except Exception:
-            pass
+                from plyer import filechooser
+                result = filechooser.open_file(title=t("Select image with QR code", "Выберите изображение с QR-кодом"), filters=[("Image", "*.png", "*.jpg", "*.jpeg")])
+                if result and result[0]:
+                    Clock.schedule_once(lambda dt: on_done(result[0]), 0)
+                else:
+                    toast(t("Photo not received", "Фото не получено"))
+            except Exception as e:
+                toast(t("Error", "Ошибка") + f": {e}")
 
     def _go_back(self):
-        self._stop_camera()
         app = MDApp.get_running_app()
         app.sm.transition.direction = "right"
         app.sm.current = "add_edit"
@@ -1304,7 +1286,7 @@ class AuthenticatorApp(MDApp):
             md_bg_color: app.theme_cls.primary_color
             specific_text_color: 1, 1, 1, 1
             left_action_items: [["arrow-left", lambda x: root._go_back()]]
-            right_action_items: [["", lambda x: None]]
+            right_action_items: [["camera-plus", lambda x: root._take_photo_fallback()]]
 
         BoxLayout:
             id: camera_container
