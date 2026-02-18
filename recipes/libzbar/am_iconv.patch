@@ -1,0 +1,15 @@
+diff --git a/configure.ac b/configure.ac
+--- a/configure.ac
++++ b/configure.ac
+@@ -102,10 +102,10 @@ ZBAR_CHK_CODE([i25], [Interleaved 2 of 5 symbology])
+ ZBAR_CHK_CODE([qrcode], [QR Code])
+ 
+ dnl libraries
+ 
+ AC_SEARCH_LIBS([clock_gettime], [rt])
+-AM_ICONV()
++AC_CHECK_LIB([iconv], [iconv_open], [LIBS="-liconv $LIBS"], [])
+ 
+ dnl poll support
+ AC_CHECK_HEADERS([poll.h], [have_poll="yes"], [have_poll="no"])
+ AM_CONDITIONAL([HAVE_POLL], [test "x$have_poll" = "xyes"])

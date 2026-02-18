@@ -1,1 +1,7 @@
 <uses-feature android:name="android.hardware.camera.autofocus" android:required="false" />
+<!-- Android 11+ package visibility for ZXing Barcode Scanner intent -->
+<queries>
+  <intent>
+    <action android:name="com.google.zxing.client.android.SCAN" />
+  </intent>
+</queries>

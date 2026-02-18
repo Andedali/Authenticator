@@ -23,7 +23,7 @@ version = 1.0.0
 
 # (list) Application requirements
 # comma separated e.g. requirements = sqlite3,kivy
-requirements = python3,kivy==2.3.1,kivymd==1.2.0,pyotp,pillow,plyer,numpy,opencv,materialyoucolor,exceptiongroup,asyncgui,asynckivy,filetype
+requirements = python3,kivy==2.3.1,kivymd==1.2.0,pyotp,pillow,plyer,numpy,opencv,libiconv,libzbar,pyzbar,xcamera,zbarcam,materialyoucolor,exceptiongroup,asyncgui,asynckivy,filetype
 
 # (str) Supported orientation (one of landscape, sensorLandscape, portrait or all)
 orientation = portrait
@@ -86,6 +86,13 @@ icon.adaptive_background.filename = %(source.dir)s/icon_bg.png
 
 # (str) Presplash of the application
 presplash.filename = %(source.dir)s/presplash.png
+
+#
+# Python for android (p4a) specific
+#
+
+# (str) The directory in which python-for-android should look for your own build recipes (if any)
+p4a.local_recipes = %(source.dir)s/recipes
 
 [buildozer]
 

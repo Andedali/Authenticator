@@ -45,9 +45,7 @@ from kivymd.uix.toolbar import MDTopAppBar
 from kivymd.uix.progressbar import MDProgressBar
 from kivy.uix.label import Label
 from kivy.uix.modalview import ModalView
-from kivy.uix.camera import Camera
 from kivy.animation import Animation
-from kivy.graphics import PushMatrix, PopMatrix, Rotate
 
 # ── Window size for desktop testing (ignored on mobile) ──────────────
 from kivy.utils import platform
@@ -97,38 +95,203 @@ from PIL import Image as _PILImage
 
 # ── QR scan dependencies (pyzbar or opencv fallback) ──
 def _decode_qr_from_path(path):
-    """Decode QR from image path with preprocessing."""
-    try:
-        import cv2
+    """Decode QR from image path with preprocessing. Supports content:// URIs on Android."""
+    if not path or not isinstance(path, str):
+        print(f"[_decode_qr_from_path] Invalid path: {path}")
+        return None
 
-        img = cv2.imread(path)
-        if img is None:
+    # Android: path may be content:// URI — read to temp file first
+    temp_path = None
+    if path.startswith("content://") and platform == "android":
+        try:
+            from jnius import autoclass
+            PythonActivity = autoclass("org.kivy.android.PythonActivity")
+            resolver = PythonActivity.mActivity.getContentResolver()
+            Uri = autoclass("android.net.Uri")
+            uri = Uri.parse(path)
+            from jnius import autoclass
+            ByteArrayOutputStream = autoclass("java.io.ByteArrayOutputStream")
+            
+            inp = resolver.openInputStream(uri)
+            baos = ByteArrayOutputStream()
+            
+            # Читаем данные порциями используя ByteArrayOutputStream
+            chunk_size = 8192
+            buffer = [0] * chunk_size  # Python list, будет преобразован в Java byte[]
+            total_read = 0
+            
+            while True:
+                # Используем read(byte[]) - стандартный метод Java InputStream
+                bytes_read = inp.read(buffer)
+                if bytes_read <= 0:
+                    break
+                # Записываем прочитанные байты в ByteArrayOutputStream
+                baos.write(buffer, 0, bytes_read)
+                total_read += bytes_read
+            
+            # Получаем все данные из ByteArrayOutputStream
+            data_bytes = baos.toByteArray()
+            inp.close()
+            baos.close()
+            
+            # Записываем в файл
+            fd, temp_path = tempfile.mkstemp(suffix=".jpg")
+            try:
+                with os.fdopen(fd, "wb") as f:
+                    # Преобразуем Java byte array в Python bytes
+                    if not isinstance(data_bytes, bytes):
+                        data_bytes = bytes(list(data_bytes))
+                    f.write(data_bytes)
+                print(f"[_decode_qr_from_path] Read {total_read} bytes from content URI")
+            except Exception as e:
+                print(f"[_decode_qr_from_path] Error writing temp file: {e}")
+                try:
+                    os.close(fd)
+                    if temp_path and os.path.exists(temp_path):
+                        os.remove(temp_path)
+                    temp_path = None
+                except Exception:
+                    pass
+            path = temp_path
+            # Проверяем, что файл не пустой
+            if temp_path and os.path.exists(temp_path):
+                file_size = os.path.getsize(temp_path)
+                if file_size == 0:
+                    print(f"[_decode_qr_from_path] WARNING: Temp file is empty after reading!")
+                    try:
+                        os.remove(temp_path)
+                        temp_path = None
+                    except Exception:
+                        pass
+        except Exception as e:
+            print(f"[_decode_qr_from_path] Failed to read content URI: {e}")
             return None
 
-        gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
-
-        # Increase contrast
-        gray = cv2.equalizeHist(gray)
-
-        detector = cv2.QRCodeDetector()
-        data, _, _ = detector.detectAndDecode(gray)
-
-        if data:
-            return data
-
-    except Exception:
-        pass
+    # Проверяем, что файл существует
+    if not os.path.exists(path):
+        print(f"[_decode_qr_from_path] File does not exist: {path}")
+        return None
+    
+    file_size = os.path.getsize(path)
+    print(f"[_decode_qr_from_path] File exists, size: {file_size} bytes")
+    if file_size == 0:
+        print(f"[_decode_qr_from_path] ERROR: File is empty, cannot decode QR")
+        return None
 
     try:
-        from pyzbar import pyzbar
-        img = _PILImage.open(path).convert("RGB")
-        decoded = pyzbar.decode(img)
-        if decoded:
-            return decoded[0].data.decode("utf-8", errors="ignore")
-    except Exception:
-        pass
+        # Метод 1: OpenCV
+        try:
+            import cv2
+            print(f"[_decode_qr_from_path] Trying OpenCV, path: {path}")
+            img = cv2.imread(path)
+            if img is None:
+                print(f"[_decode_qr_from_path] OpenCV: Failed to read image")
+                return None
 
-    return None
+            print(f"[_decode_qr_from_path] OpenCV: Image shape: {img.shape}")
+            gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+            gray = cv2.equalizeHist(gray)
+            gray = cv2.GaussianBlur(gray, (3, 3), 0)
+
+            detector = cv2.QRCodeDetector()
+            data, points, _ = detector.detectAndDecode(gray)
+            if data:
+                print(f"[_decode_qr_from_path] OpenCV: Found QR code: {data[:50]}...")
+                return data
+            else:
+                print(f"[_decode_qr_from_path] OpenCV: No QR code found, trying rotations...")
+
+            # Попробовать повёрнутые варианты (важно для Android)
+            for rot_name, rot in [("90°", cv2.ROTATE_90_CLOCKWISE), ("-90°", cv2.ROTATE_90_COUNTERCLOCKWISE), ("180°", cv2.ROTATE_180)]:
+                img_rot = cv2.rotate(img, rot)
+                gray = cv2.cvtColor(img_rot, cv2.COLOR_BGR2GRAY)
+                gray = cv2.equalizeHist(gray)
+                data, _, _ = detector.detectAndDecode(gray)
+                if data:
+                    print(f"[_decode_qr_from_path] OpenCV: Found QR code at {rot_name}: {data[:50]}...")
+                    return data
+            print(f"[_decode_qr_from_path] OpenCV: No QR code found in any rotation")
+
+        except Exception as cv_err:
+            print(f"[_decode_qr_from_path] OpenCV error: {cv_err}")
+
+        # Метод 2: pyzbar
+        try:
+            from pyzbar import pyzbar
+            from PIL import ImageOps
+            print(f"[_decode_qr_from_path] Trying pyzbar, path: {path}")
+            img = _PILImage.open(path)
+            print(f"[_decode_qr_from_path] PIL: Image size: {img.size}, mode: {img.mode}")
+            img = ImageOps.exif_transpose(img)  # важно для фото с Android
+            img = img.convert("RGB")
+            print(f"[_decode_qr_from_path] PIL: After conversion - size: {img.size}, mode: {img.mode}")
+            
+            try:
+                decoded = pyzbar.decode(img)
+                print(f"[_decode_qr_from_path] pyzbar.decode: Found {len(decoded) if decoded else 0} codes")
+                if decoded:
+                    data = decoded[0].data.decode("utf-8", errors="ignore")
+                    print(f"[_decode_qr_from_path] pyzbar: Found QR code: {data[:50]}...")
+                    return data
+            except Exception as pyzbar_err:
+                # Перехватываем ошибки pyzbar (ctypes.ArgumentError и т.д.)
+                print(f"[_decode_qr_from_path] pyzbar.decode error: {pyzbar_err}")
+                # Пробуем с явным указанием symbols
+                try:
+                    decoded = pyzbar.decode(img, symbols=[pyzbar.ZBarSymbol.QRCODE])
+                    if decoded:
+                        data = decoded[0].data.decode("utf-8", errors="ignore")
+                        print(f"[_decode_qr_from_path] pyzbar (with symbols): Found QR code: {data[:50]}...")
+                        return data
+                except Exception as pyzbar_err2:
+                    print(f"[_decode_qr_from_path] pyzbar.decode (with symbols) error: {pyzbar_err2}")
+        except Exception as e:
+            print(f"[_decode_qr_from_path] PIL/pyzbar import/processing error: {e}")
+            import traceback
+            traceback.print_exc()
+
+        return None
+    finally:
+        if temp_path and os.path.exists(temp_path):
+            try:
+                os.remove(temp_path)
+            except Exception:
+                pass
+
+
+# ── Patch zbarcam to handle pyzbar errors on Android ──
+def _patch_zbarcam():
+    """Patch ZBarCam._detect_qrcode_frame to catch pyzbar errors."""
+    try:
+        from kivy_garden.zbarcam import zbarcam as _zbarcam_mod
+        # Проверяем, не патчили ли уже
+        if hasattr(_zbarcam_mod.ZBarCam._detect_qrcode_frame, '_patched'):
+            return
+        
+        # Сохраняем оригинальный classmethod
+        _orig_detect = _zbarcam_mod.ZBarCam._detect_qrcode_frame
+        # Получаем оригинальную функцию из classmethod
+        _orig_func = _orig_detect.__func__ if hasattr(_orig_detect, '__func__') else _orig_detect
+
+        @classmethod
+        def _safe_detect_qrcode_frame(cls, texture, code_types):
+            try:
+                # Вызываем оригинальный метод правильно (cls как первый аргумент для classmethod)
+                return _orig_func(cls, texture, code_types)
+            except Exception as e:
+                # Перехватываем ошибки pyzbar/ctypes, чтобы приложение не падало
+                # Не логируем каждую ошибку, чтобы не засорять лог
+                return []
+
+        # Применяем патч
+        _zbarcam_mod.ZBarCam._detect_qrcode_frame = _safe_detect_qrcode_frame
+        _zbarcam_mod.ZBarCam._detect_qrcode_frame._patched = True
+        print("[Authenticator] ZBarCam patched successfully")
+    except Exception as e:
+        print(f"[Authenticator] ZBarCam patch failed: {e}")
+
+# Применяем патч при импорте модуля (отложенно, когда zbarcam будет доступен)
+# Патч будет применен при первом вызове start_zbarcam
 
 
 def _decode_qr_from_frame(frame_bgr):
@@ -658,6 +821,10 @@ class AddEditScreen(MDScreen):
     """Screen for adding or editing a service."""
 
     editing_index = NumericProperty(-1)  # -1 = adding new
+    
+    def __init__(self, **kwargs):
+        super().__init__(**kwargs)
+        self._pending_otpauth = ""  # QR код для применения при входе на экран
 
     def on_enter(self):
         """Populate fields if editing existing service."""
@@ -673,11 +840,20 @@ class AddEditScreen(MDScreen):
             self.ids.save_btn.text = t("UPDATE", "ОБНОВИТЬ")
         else:
             self.ids.toolbar.title = t("Add Service", "Добавить сервис")
-            self.ids.field_title.text = ""
-            self.ids.field_url.text = ""
-            self.ids.field_secret.text = ""
-            self.ids.field_account.text = ""
-            self.ids.field_backup.text = ""
+            # Проверяем, есть ли данные QR кода для применения
+            if self._pending_otpauth:
+                print(f"[AddEditScreen] on_enter: Applying pending QR code data")
+                otpauth_data = self._pending_otpauth
+                self._pending_otpauth = ""  # Очищаем, чтобы не применять повторно
+                # Применяем данные через небольшую задержку, чтобы виджеты точно были созданы
+                Clock.schedule_once(lambda dt: self._apply_otpauth(otpauth_data), 0.1)
+            else:
+                # Очищаем поля только если нет данных QR кода
+                self.ids.field_title.text = ""
+                self.ids.field_url.text = ""
+                self.ids.field_secret.text = ""
+                self.ids.field_account.text = ""
+                self.ids.field_backup.text = ""
             self.ids.save_btn.text = t("SAVE", "СОХРАНИТЬ")
 
     def save_service(self):
@@ -786,8 +962,10 @@ class AddEditScreen(MDScreen):
 
     def _apply_otpauth(self, uri: str):
         """Parse otpauth:// URI and fill form fields."""
+        print(f"[AddEditScreen] _apply_otpauth called with URI: {uri[:100]}...")
         uri = uri.strip()
         if not uri.lower().startswith("otpauth://"):
+            print(f"[AddEditScreen] Invalid format, URI doesn't start with otpauth://")
             toast(t("Invalid format (expected otpauth://)", "Неверный формат (ожидается otpauth://)"))
             return
         try:
@@ -803,6 +981,23 @@ class AddEditScreen(MDScreen):
                 account = parts[1].strip() if len(parts) > 1 else ""
             else:
                 account = label.strip()
+            
+            print(f"[AddEditScreen] Parsed - secret: {secret[:20]}..., issuer: {issuer}, account: {account}")
+            
+            # Проверяем, что виджеты существуют
+            if "field_secret" not in self.ids:
+                print(f"[AddEditScreen] ERROR: field_secret not found in ids!")
+                toast(t("Form not ready", "Форма не готова"))
+                return
+            if "field_title" not in self.ids:
+                print(f"[AddEditScreen] ERROR: field_title not found in ids!")
+                toast(t("Form not ready", "Форма не готова"))
+                return
+            if "field_account" not in self.ids:
+                print(f"[AddEditScreen] ERROR: field_account not found in ids!")
+                toast(t("Form not ready", "Форма не готова"))
+                return
+            
             self.ids.field_secret.text = secret.replace(" ", "").upper()
             self.ids.field_secret.error = False
             self.ids.field_title.text = issuer or account or "unknown"
@@ -810,8 +1005,12 @@ class AddEditScreen(MDScreen):
             self.ids.field_account.text = account
             self.ids.field_title.helper_text_mode = "on_focus"
             self.ids.field_secret.helper_text_mode = "on_focus"
+            print(f"[AddEditScreen] Fields filled successfully")
             toast(t("QR code scanned", "QR-код считан"))
         except Exception as e:
+            print(f"[AddEditScreen] Parse error: {e}")
+            import traceback
+            traceback.print_exc()
             toast(t("Parse error", "Ошибка разбора") + f": {e}")
 
     def go_back(self):
@@ -829,222 +1028,393 @@ class BackupCodesScreen(MDScreen):
         app.sm.current = "main"
 
 
-# ── QRScanScreen — ФИКС ПОВОРОТА: angle=90 + надёжный origin + reapply после layout ──
-# (Kivy Camera на Android по умолчанию даёт -90° offset в превью — компенсируем +90°)
+# ── QRScanScreen — ZBarCam (pyzbar) ──
 
-class QRScanScreen(MDScreen):
+def _safe_filechooser(callback):
+    """Безопасный вызов filechooser (перехват краша на Android)."""
+    try:
+        from plyer import filechooser
+        filechooser.open_file(on_selection=callback)
+    except Exception as e:
+        print("Filechooser error:", e)
+
+
+def _launch_zxing_android(on_result):
     """
-    Стабильный QR-сканер для Android (Kivy Camera + OpenCV)
-    
-    ИСПРАВЛЕНИЯ (основаны на логах ROTATION_90 + опыте Kivy/SO):
-    - Превью: фиксированный angle=90 (компенсирует встроенный -90° Kivy Camera)
-    - Origin: width/2, height/2 (более надёжно, чем center_x/y)
-    - Reapply: после добавления камеры (через Clock, чтобы layout прошёл)
-    - Frame для QR: авто-ротация на основе _get_android_display_rotation()
-    - Debug: логи в консоль (adb logcat | grep QR)
+    Launch ZXing Barcode Scanner via Intent on Android.
+    on_result(data) - called with QR string when OK, None when cancelled.
+    Raises if ZXing app is not installed (caller should fall back to camera).
     """
+    import android.activity
+    from jnius import autoclass
 
-    def __init__(self, **kwargs):
-        super().__init__(**kwargs)
-        self._camera = None
-        self._scanning = False
-        self._last_data = None
-        self._scan_interval = 0.08  # ~12 FPS для скорости
+    Intent = autoclass("android.content.Intent")
+    PythonActivity = autoclass("org.kivy.android.PythonActivity")
+    Activity = autoclass("android.app.Activity")
 
-        try:
-            import cv2
-            self._detector = cv2.QRCodeDetector()
-        except Exception:
-            self._detector = None
+    REQUEST_ZXING = 0x125
+    intent = Intent("com.google.zxing.client.android.SCAN")
+    intent.putExtra("SCAN_MODE", "QR_CODE_MODE")
 
-    # ========================
-    # SCREEN EVENTS
-    # ========================
-
-    def on_enter(self):
-        Clock.schedule_once(lambda dt: self.start_camera(), 0.2)
-
-    def on_leave(self, *args):
-        self.stop_camera()
-
-    # ========================
-    # CAMERA CONTROL
-    # ========================
-
-    def start_camera(self):
-        self.stop_camera()
-
-        try:
-            self._camera = Camera(
-                index=0,
-                resolution=(640, 480),
-                play=True,
-                allow_stretch=True,
-                keep_ratio=True,
-                size_hint=(1, 1),
-            )
-
-            self.ids.camera_container.clear_widgets()
-            self.ids.camera_container.add_widget(self._camera)
-
-            self._scanning = True
-
-            # ── ФИКС ПОВОРОТА ПРЕВЬЮ (Kivy Android) ──
-            if platform == "android":
-                Clock.schedule_once(self._apply_camera_rotation, 0.3)  # После layout
-
-            # Сканирование
-            Clock.schedule_interval(self._scan_frame, self._scan_interval)
-
-        except Exception as e:
-            self.ids.camera_container.clear_widgets()
-            lbl = MDLabel(
-                text=f"Ошибка камеры:\n{e}",
-                halign="center",
-                valign="middle",
-                theme_text_color="Error",
-            )
-            self.ids.camera_container.add_widget(lbl)
-
-    def _apply_camera_rotation(self, *_):
-        """Применяем Rotate к камере (компенсируем -90°).
-        PopMatrix в canvas.after — иначе вращение не применяется к отрисовке камеры.
-        """
-        if not self._camera:
+    def on_activity_result(request_code, result_code, intent_obj):
+        if request_code != REQUEST_ZXING:
             return
-
-        angle = -90  # ← ОСНОВНОЙ ФИКС (попробуй -90 / 0 / 180 если не так)
-        print(f"[QR] Applying preview rotation: {angle}°")
-
-        with self._camera.canvas.before:
-            PushMatrix()
-            self._camera._rot = Rotate(
-                angle=angle,
-                origin=(self._camera.center_x, self._camera.center_y),
-            )
-
-        with self._camera.canvas.after:
-            PopMatrix()
-
-        def update_rot(widget, *args):
-            if hasattr(widget, "_rot"):
-                widget._rot.origin = (widget.center_x, widget.center_y)
-
-        self._camera.bind(pos=update_rot, size=update_rot)
-        self._camera.canvas.ask_update()
-
-    def stop_camera(self):
-        self._scanning = False
-        Clock.unschedule(self._scan_frame)
-
-        if self._camera:
+        android.activity.unbind(on_activity_result=on_activity_result)
+        result_ok = getattr(Activity, "RESULT_OK", -1)
+        is_ok = result_code == result_ok or result_code == -1
+        data = None
+        if is_ok and intent_obj is not None:
             try:
-                self._camera.play = False
+                data = intent_obj.getStringExtra("SCAN_RESULT")
+                if data:
+                    data = str(data)
             except Exception:
                 pass
-            self._camera = None
+        Clock.schedule_once(lambda dt: on_result(data), 0)
 
-        if "camera_container" in self.ids:
-            self.ids.camera_container.clear_widgets()
+    android.activity.bind(on_activity_result=on_activity_result)
+    PythonActivity.mActivity.startActivityForResult(intent, REQUEST_ZXING)
 
-    # ========================
-    # FRAME SCANNING
-    # ========================
 
-    def _scan_frame(self, dt):
-        if not self._scanning or not self._camera:
-            return
+def _pick_image_android(callback):
+    """
+    Android image picker via Intent.ACTION_GET_CONTENT.
+    Reads content URI to temp file — works with Gallery, Google Photos, etc.
+    callback(selection) — selection is list of paths or [content_uri].
+    """
+    try:
+        import android.activity
+        from jnius import autoclass, cast
+
+        Intent = autoclass("android.content.Intent")
+        PythonActivity = autoclass("org.kivy.android.PythonActivity")
+        Activity = autoclass("android.app.Activity")
+        String = autoclass("java.lang.String")
+
+        REQUEST_PICK = 0x126
+        resolver = PythonActivity.mActivity.getContentResolver()
+
+        def read_uri_to_temp(uri):
+            path = None
+            try:
+                from jnius import autoclass
+                ByteArrayOutputStream = autoclass("java.io.ByteArrayOutputStream")
+                
+                inp = resolver.openInputStream(uri)
+                baos = ByteArrayOutputStream()
+                
+                # Читаем данные порциями используя ByteArrayOutputStream
+                chunk_size = 8192
+                buffer = [0] * chunk_size  # Python list, будет преобразован в Java byte[]
+                total_read = 0
+                
+                while True:
+                    # Используем read(byte[]) - стандартный метод Java InputStream
+                    # jnius автоматически преобразует Python list в Java byte[]
+                    bytes_read = inp.read(buffer)
+                    if bytes_read <= 0:
+                        break
+                    # Записываем прочитанные байты в ByteArrayOutputStream
+                    baos.write(buffer, 0, bytes_read)
+                    total_read += bytes_read
+                
+                # Получаем все данные из ByteArrayOutputStream
+                data_bytes = baos.toByteArray()
+                inp.close()
+                baos.close()
+                
+                # Записываем в файл
+                fd, path = tempfile.mkstemp(suffix=".jpg")
+                try:
+                    with os.fdopen(fd, "wb") as f:
+                        # Преобразуем Java byte array в Python bytes
+                        if not isinstance(data_bytes, bytes):
+                            data_bytes = bytes(list(data_bytes))
+                        f.write(data_bytes)
+                    print(f"[_pick_image_android] Read {total_read} bytes from URI")
+                finally:
+                    try:
+                        inp.close()
+                    except Exception:
+                        pass
+                # Проверяем, что файл не пустой
+                if path and os.path.exists(path):
+                    file_size = os.path.getsize(path)
+                    print(f"[_pick_image_android] Temp file size: {file_size} bytes")
+                    if file_size == 0:
+                        print(f"[_pick_image_android] WARNING: Temp file is empty!")
+                        try:
+                            os.remove(path)
+                            path = None
+                        except Exception:
+                            pass
+            except Exception as e:
+                print(f"[_pick_image_android] Error reading URI: {e}")
+                import traceback
+                traceback.print_exc()
+                if path and os.path.exists(path):
+                    try:
+                        os.remove(path)
+                    except Exception:
+                        pass
+                path = None
+            return path
+
+        def on_activity_result(request_code, result_code, intent_obj):
+            if request_code != REQUEST_PICK:
+                return
+            android.activity.unbind(on_activity_result=on_activity_result)
+            result_ok = getattr(Activity, "RESULT_OK", -1)
+            is_ok = result_code == result_ok or result_code == -1
+            selection = []
+            if is_ok and intent_obj is not None:
+                uri = intent_obj.getData()
+                if uri is not None:
+                    path = read_uri_to_temp(uri)
+                    if path:
+                        selection = [path]
+                    else:
+                        uri_str = str(uri.toString())
+                        if uri_str.startswith("content://"):
+                            selection = [uri_str]
+            Clock.schedule_once(lambda dt: callback(selection), 0)
+
+        android.activity.bind(on_activity_result=on_activity_result)
+        intent = Intent(Intent.ACTION_GET_CONTENT)
+        intent.setType("image/*")
+        intent.addCategory(Intent.CATEGORY_OPENABLE)
+        PythonActivity.mActivity.startActivityForResult(
+            Intent.createChooser(intent, cast("java.lang.CharSequence", String("Select image"))),
+            REQUEST_PICK
+        )
+    except Exception as e:
+        print("[Authenticator] Pick image failed:", e)
+        Clock.schedule_once(lambda dt: callback([]), 0)
+
+
+class QRScanScreen(MDScreen):
+    def __init__(self, **kwargs):
+        super().__init__(**kwargs)
+        self._zbarcam = None
+        self._found = False
+
+    # =============================
+    # SCREEN EVENTS
+    # =============================
+
+    def on_enter(self):
+        if platform == "android":
+            def _on_zxing_result(data):
+                if data:
+                    self._on_qr_found(data)
+                else:
+                    # Пользователь отменил ZXing - запускаем наш сканер после задержки
+                    # (нужно время, чтобы камера освободилась после ZXing)
+                    Clock.schedule_once(lambda dt: self.start_zbarcam(), 1.0)
+
+            def _try_zxing(dt):
+                try:
+                    _launch_zxing_android(_on_zxing_result)
+                except Exception as e:
+                    err = str(e)
+                    if "ActivityNotFound" in err or "No Activity" in err:
+                        toast(t(
+                            "Install Barcode Scanner from Play Store for best QR scanning",
+                            "Установите Barcode Scanner из Play Store для сканирования QR"
+                        ))
+                    # ZXing не установлен или ошибка - используем наш сканер
+                    Clock.schedule_once(lambda dt: self.start_zbarcam(), 0.5)
+
+            Clock.schedule_once(_try_zxing, 0.2)
+        else:
+            # На десктопе используем zbarcam
+            Clock.schedule_once(lambda dt: self.start_zbarcam(), 0.2)
+
+    def on_leave(self, *args):
+        self.stop_zbarcam()
+
+    # =============================
+    # ZBARCAM
+    # =============================
+
+    def start_zbarcam(self):
+        self.stop_zbarcam()
 
         try:
-            import cv2
-            import numpy as np
+            # Применяем патч zbarcam перед созданием виджета (если еще не применен)
+            _patch_zbarcam()
+            
+            from kivy_garden.zbarcam import ZBarCam
 
-            if platform == "android":
-                provider = getattr(self._camera, "_camera", None)
-                if not provider or not hasattr(provider, "grab_frame"):
-                    return
+            self._zbarcam = ZBarCam(
+                resolution=[640, 480],
+                code_types=['QRCODE'],  # Только QR коды
+            )
 
-                buf = provider.grab_frame()
-                if not buf:
-                    return
+            # Отслеживаем изменения symbols
+            self._zbarcam.bind(symbols=self._on_symbols_changed)
 
-                buf = bytes(buf) if not isinstance(buf, bytes) else buf
-                w, h = getattr(provider, "_resolution", (640, 480))
+            self.ids.camera_container.clear_widgets()
+            self.ids.camera_container.add_widget(self._zbarcam)
+            
+            # Устанавливаем индекс камеры после добавления виджета
+            # (camera_index устанавливается через xcamera.index в свойстве xcamera)
+            self._zbarcam.camera_index = 0
 
-                need = (h + h // 2) * w
-                if len(buf) < need:
-                    return
-
-                arr = np.frombuffer(buf[:need], dtype=np.uint8)
-                arr = arr.reshape((h + h // 2, w))
-                frame = cv2.cvtColor(arr, cv2.COLOR_YUV2BGR_NV21)
-                # NV21 на Android почти всегда приходит повёрнут на 90° против часовой
-                frame = cv2.rotate(frame, cv2.ROTATE_90_CLOCKWISE)
-
-            else:
-                texture = self._camera.texture
-                if not texture or not texture.pixels:
-                    return
-
-                image_data = texture.pixels
-                image_data = bytes(image_data) if not isinstance(image_data, bytes) else image_data
-                w, h = texture.size
-
-                expected = w * h * 4
-                if len(image_data) < expected:
-                    return
-
-                arr = np.frombuffer(image_data[:expected], dtype=np.uint8)
-                frame = arr.reshape((h, w, 4))
-                frame = cv2.cvtColor(frame, cv2.COLOR_RGBA2BGR)
-
-            data = _decode_qr_from_frame(frame)
-
-            if data and data.strip() and data != self._last_data:
-                self._last_data = data
-                print(f"[QR] DETECTED: {data[:60]}...")
-                Clock.schedule_once(lambda dt: self.on_qr_found(data), 0)
+            # Запускаем камеру только если виджет создан успешно
+            def _start_camera(dt):
+                if self._zbarcam is not None:
+                    try:
+                        self._zbarcam.start()
+                    except Exception as e:
+                        print(f"[QRScanScreen] Error starting camera: {e}")
+            Clock.schedule_once(_start_camera, 0.3)
 
         except Exception as e:
-            print(f"[QR] scan error: {e}")
+            self._zbarcam = None  # Убеждаемся, что None при ошибке
+            self.ids.camera_container.clear_widgets()
+            error_label = MDLabel(
+                text=t("Camera error", "Ошибка камеры") + f": {str(e)}",
+                halign="center",
+                theme_text_color="Error"
+            )
+            self.ids.camera_container.add_widget(error_label)
+            print(f"[QRScanScreen] Error starting zbarcam: {e}")
 
-    # ========================
-    # QR RESULT
-    # ========================
+    def stop_zbarcam(self):
+        if self._zbarcam:
+            try:
+                self._zbarcam.stop()
+            except Exception as e:
+                print(f"[QRScanScreen] Error stopping zbarcam: {e}")
+
+            if "camera_container" in self.ids:
+                try:
+                    self.ids.camera_container.clear_widgets()
+                except Exception:
+                    pass
+
+            self._zbarcam = None
+
+        self._found = False
+
+    # =============================
+    # SYMBOLS HANDLER
+    # =============================
+
+    def _on_symbols_changed(self, instance, symbols):
+        """Вызывается когда ZBarCam находит QR коды."""
+        try:
+            if self._found or not symbols:
+                return
+
+            print(f"[QRScanScreen] ZBarCam found {len(symbols)} symbol(s)")
+            
+            # Берём первый найденный QR код
+            for symbol in symbols:
+                if symbol.data:
+                    try:
+                        data = symbol.data.decode('utf-8') if isinstance(symbol.data, bytes) else str(symbol.data)
+                        if data and data.strip():
+                            print(f"[QRScanScreen] ZBarCam decoded QR: {data[:50]}...")
+                            # Показываем toast для отладки
+                            toast(t(f"QR found: {data[:30]}...", f"QR найден: {data[:30]}..."), duration=1.5)
+                            self._found = True
+                            Clock.schedule_once(
+                                lambda dt, d=data: self._on_qr_found(d),
+                                0,
+                            )
+                            return
+                    except Exception as e:
+                        print(f"[QRScanScreen] Error decoding symbol data: {e}")
+                        pass
+        except Exception as e:
+            # Перехватываем ошибки от pyzbar (ctypes.ArgumentError и т.д.)
+            # чтобы приложение не падало
+            print(f"[QRScanScreen] Error in _on_symbols_changed: {e}")
+            # Не показываем ошибку пользователю - просто игнорируем этот кадр
+
+    # =============================
+    # RESULT
+    # =============================
+
+    def _on_qr_found(self, data):
+        self.stop_zbarcam()
+
+        app = MDApp.get_running_app()
+
+        print(f"[QRScanScreen] _on_qr_found called with data: {data[:100]}...")
+        
+        # Сохраняем данные QR кода в экране add_edit перед переходом
+        try:
+            add_screen = app.sm.get_screen("add_edit")
+            add_screen._pending_otpauth = data
+            print(f"[QRScanScreen] Saved QR data to add_edit screen")
+        except Exception as e:
+            print(f"[QRScanScreen] Error saving QR data: {e}")
+            import traceback
+            traceback.print_exc()
+        
+        # Переходим на экран add_edit - данные будут применены в on_enter
+        app.sm.transition.direction = "right"
+        app.sm.current = "add_edit"
 
     def on_qr_found(self, data):
-        print(f"[QR] FOUND: {data}")
-        self.stop_camera()
+        """Alias for pick_image compatibility."""
+        self._on_qr_found(data)
 
+    # =============================
+    # BACK BUTTON
+    # =============================
+
+    def go_back(self):
+        self.stop_zbarcam()
         app = MDApp.get_running_app()
         app.sm.transition.direction = "right"
         app.sm.current = "add_edit"
 
-        add_screen = app.sm.get_screen("add_edit")
-        add_screen._apply_otpauth(data)
-
-    # ========================
+    # =============================
     # FILE PICKER
-    # ========================
+    # =============================
 
     def pick_image(self):
-        from plyer import filechooser
-
         def _cb(selection):
             if not selection:
+                toast(t("No image selected", "Изображение не выбрано"))
                 return
             path = selection[0]
+            if not path:
+                toast(t("No image selected", "Изображение не выбрано"))
+                return
+            print(f"[QRScanScreen] Decoding QR from path: {path}")
             data = _decode_qr_from_path(path)
             if data:
+                print(f"[QRScanScreen] QR decoded successfully: {data[:50]}...")
                 self.on_qr_found(data)
+            else:
+                print(f"[QRScanScreen] QR code not found in image")
+                toast(t("QR code not found in image", "QR-код не найден на изображении"))
 
-        filechooser.open_file(on_selection=_cb)
+        if platform == "android":
+            _pick_image_android(_cb)
+        else:
+            _safe_filechooser(_cb)
 
 
 class AuthenticatorApp(MDApp):
     """Main application class."""
 
     _is_desktop = platform not in ('android', 'ios')
+
+    def on_resume(self):
+        """Пересоздание камеры после возврата из Android Activity (решает зависание после интентов)."""
+        try:
+            if self.sm.current == "qr_scan":
+                screen = self.sm.current_screen
+                if hasattr(screen, "start_zbarcam"):
+                    Clock.schedule_once(lambda dt: screen.start_zbarcam(), 0.5)
+        except Exception:
+            pass
 
     def __init__(self, **kwargs):
         super().__init__(**kwargs)
@@ -1359,6 +1729,7 @@ class AuthenticatorApp(MDApp):
 
         BoxLayout:
             id: camera_container
+            size_hint: 1, 1
 """
 
         Builder.load_string(KV)
@@ -1440,7 +1811,7 @@ class AuthenticatorApp(MDApp):
     def go_back(self):
         """Navigate back from QR scan to add_edit screen."""
         if hasattr(self, "qr_scan_screen") and self.qr_scan_screen:
-            self.qr_scan_screen.stop_camera()
+            self.qr_scan_screen.stop_zbarcam()
         self.sm.transition.direction = "right"
         self.sm.current = "add_edit"
 

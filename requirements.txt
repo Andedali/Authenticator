@@ -5,4 +5,5 @@ pyperclip>=1.11.0
 pillow>=10.0.0
 plyer>=2.1.0
 pyzbar>=0.1.9
+zbarcam
 opencv-python>=4.5.0
