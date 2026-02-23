@@ -1083,43 +1083,6 @@ def _safe_filechooser(callback):
         print("Filechooser error:", e)
 
 
-def _launch_zxing_android(on_result):
-    """
-    Launch ZXing Barcode Scanner via Intent on Android.
-    on_result(data) - called with QR string when OK, None when cancelled.
-    Raises if ZXing app is not installed (caller should fall back to camera).
-    """
-    import android.activity
-    from jnius import autoclass
-
-    Intent = autoclass("android.content.Intent")
-    PythonActivity = autoclass("org.kivy.android.PythonActivity")
-    Activity = autoclass("android.app.Activity")
-
-    REQUEST_ZXING = 0x125
-    intent = Intent("com.google.zxing.client.android.SCAN")
-    intent.putExtra("SCAN_MODE", "QR_CODE_MODE")
-
-    def on_activity_result(request_code, result_code, intent_obj):
-        if request_code != REQUEST_ZXING:
-            return
-        android.activity.unbind(on_activity_result=on_activity_result)
-        result_ok = getattr(Activity, "RESULT_OK", -1)
-        is_ok = result_code == result_ok or result_code == -1
-        data = None
-        if is_ok and intent_obj is not None:
-            try:
-                data = intent_obj.getStringExtra("SCAN_RESULT")
-                if data:
-                    data = str(data)
-            except Exception:
-                pass
-        Clock.schedule_once(lambda dt: on_result(data), 0)
-
-    android.activity.bind(on_activity_result=on_activity_result)
-    PythonActivity.mActivity.startActivityForResult(intent, REQUEST_ZXING)
-
-
 def _pick_image_android(callback):
     """
     Android image picker via Intent.ACTION_GET_CONTENT.
@@ -1255,32 +1218,8 @@ class QRScanScreen(MDScreen):
 
     def on_enter(self):
         self._camera_failed = False
-        if platform == "android":
-            def _on_zxing_result(data):
-                if data:
-                    self._on_qr_found(data)
-                else:
-                    # Пользователь отменил ZXing - запускаем наш сканер после задержки
-                    # (нужно время, чтобы камера освободилась после ZXing)
-                    Clock.schedule_once(lambda dt: self.start_zbarcam(), 1.0)
-
-            def _try_zxing(dt):
-                try:
-                    _launch_zxing_android(_on_zxing_result)
-                except Exception as e:
-                    err = str(e)
-                    if "ActivityNotFound" in err or "No Activity" in err:
-                        toast(t(
-                            "Install Barcode Scanner from Play Store for best QR scanning",
-                            "Установите Barcode Scanner из Play Store для сканирования QR"
-                        ))
-                    # ZXing не установлен или ошибка - используем наш сканер
-                    Clock.schedule_once(lambda dt: self.start_zbarcam(), 0.5)
-
-            Clock.schedule_once(_try_zxing, 0.2)
-        else:
-            # На десктопе используем zbarcam
-            Clock.schedule_once(lambda dt: self.start_zbarcam(), 0.2)
+        # Встроенный сканер (ZBarCam + qweenQR), один экземпляр переиспользуется
+        Clock.schedule_once(lambda dt: self.start_zbarcam(), 0.2 if platform != "android" else 0.3)
 
     def on_leave(self, *args):
         self.stop_zbarcam()
@@ -1290,24 +1229,59 @@ class QRScanScreen(MDScreen):
     # =============================
 
     def start_zbarcam(self):
-        self.stop_zbarcam()
+        # Отменяем таймеры в любом случае
+        if self._camera_check_clock:
+            try:
+                self._camera_check_clock.cancel()
+            except Exception:
+                pass
+            self._camera_check_clock = None
+        if self._poll_clock:
+            try:
+                self._poll_clock.cancel()
+            except Exception:
+                pass
+            self._poll_clock = None
+        self._found = False
+        self._decode_in_progress = False
+
+        # Переиспользуем один экземпляр ZBarCam — KV загружается один раз, меньше Connect/Error 2 циклов
+        if self._zbarcam is not None:
+            try:
+                self.ids.camera_container.clear_widgets()
+                self.ids.camera_container.add_widget(self._zbarcam)
+                self._texture_source = None
+                for src in (self._zbarcam, getattr(self._zbarcam, "xcamera", None)):
+                    if src is None:
+                        continue
+                    try:
+                        src.bind(texture=self._on_texture_qween)
+                        self._texture_source = src
+                        break
+                    except (KeyError, AttributeError, TypeError):
+                        continue
+                if self._texture_source is None:
+                    self._zbarcam.bind(symbols=self._on_symbols_changed)
+                else:
+                    self._poll_clock = Clock.schedule_interval(self._poll_texture_and_decode, 0.4)
+                self._schedule_camera_start()
+                return
+            except Exception as e:
+                print(f"[QRScanScreen] Reuse zbarcam failed: {e}")
+                self._zbarcam = None
 
         try:
-            # Применяем патч zbarcam перед созданием виджета (если еще не применен)
             _patch_zbarcam()
-            
             from kivy_garden.zbarcam import ZBarCam
 
             self._zbarcam = ZBarCam(
                 resolution=[640, 480],
                 code_types=['QRCODE'],
             )
-
             self.ids.camera_container.clear_widgets()
             self.ids.camera_container.add_widget(self._zbarcam)
             self._zbarcam.camera_index = 0
 
-            # qweenQR по texture: у ZBarCam texture может быть у дочернего xcamera
             self._texture_source = None
             for src in (self._zbarcam, getattr(self._zbarcam, "xcamera", None)):
                 if src is None:
@@ -1316,42 +1290,38 @@ class QRScanScreen(MDScreen):
                     src.bind(texture=self._on_texture_qween)
                     self._texture_source = src
                     break
-                except (KeyError, AttributeError, TypeError) as e:
+                except (KeyError, AttributeError, TypeError):
                     continue
             if self._texture_source is None:
-                # запас: распознавание по symbols от ZBarCam
                 self._zbarcam.bind(symbols=self._on_symbols_changed)
             else:
-                # Опрос по таймеру (реже = меньше лагов, decode в фоне)
-                self._poll_clock = Clock.schedule_interval(self._poll_texture_and_decode, 0.35)
+                self._poll_clock = Clock.schedule_interval(self._poll_texture_and_decode, 0.4)
 
-            def _start_camera(dt):
-                if self._zbarcam is not None:
-                    try:
-                        self._zbarcam.start()
-                        if platform == "android":
-                            if self._camera_check_clock:
-                                try:
-                                    self._camera_check_clock.cancel()
-                                except Exception:
-                                    pass
-                            self._camera_check_clock = Clock.schedule_once(self._check_camera_worked, 2.5)
-                    except Exception as e:
-                        print(f"[QRScanScreen] Error starting camera: {e}")
-                        if platform == "android":
-                            self._show_camera_fallback_ui()
-            Clock.schedule_once(_start_camera, 0.3)
-
+            self._schedule_camera_start()
         except Exception as e:
-            self._zbarcam = None  # Убеждаемся, что None при ошибке
+            self._zbarcam = None
             self.ids.camera_container.clear_widgets()
-            error_label = MDLabel(
+            self.ids.camera_container.add_widget(MDLabel(
                 text=t("Camera error", "Ошибка камеры") + f": {str(e)}",
                 halign="center",
                 theme_text_color="Error"
-            )
-            self.ids.camera_container.add_widget(error_label)
+            ))
             print(f"[QRScanScreen] Error starting zbarcam: {e}")
+
+    def _schedule_camera_start(self):
+        def _start_camera(dt):
+            if self._zbarcam is None:
+                return
+            try:
+                self._zbarcam.start()
+                if platform == "android":
+                    self._camera_check_clock = Clock.schedule_once(self._check_camera_worked, 2.5)
+            except Exception as e:
+                print(f"[QRScanScreen] Error starting camera: {e}")
+                if platform == "android":
+                    self._show_camera_fallback_ui()
+        delay = 0.5 if platform == "android" else 0.2
+        Clock.schedule_once(_start_camera, delay)
 
     def _check_camera_worked(self, dt):
         """Через 2.5 с проверяем: если кадр так и не пришёл — камера не открылась (Error 2)."""
@@ -1366,7 +1336,7 @@ class QRScanScreen(MDScreen):
     def _show_camera_fallback_ui(self):
         """Камера недоступна — предлагаем выбрать QR из галереи."""
         self._camera_failed = True
-        self.stop_zbarcam()
+        self.stop_zbarcam(destroy_widget=True)
         self.ids.camera_container.clear_widgets()
         from kivy.uix.boxlayout import BoxLayout as KivyBox
         box = KivyBox(orientation="vertical", padding=dp(24), spacing=dp(16))
@@ -1389,7 +1359,8 @@ class QRScanScreen(MDScreen):
         box.add_widget(btn)
         self.ids.camera_container.add_widget(box)
 
-    def stop_zbarcam(self):
+    def stop_zbarcam(self, destroy_widget=False):
+        """Останавливаем камеру и снимаем с контейнера. destroy_widget=True — сбросить _zbarcam (после Error 2)."""
         if self._camera_check_clock:
             try:
                 self._camera_check_clock.cancel()
@@ -1418,15 +1389,13 @@ class QRScanScreen(MDScreen):
                 self._zbarcam.stop()
             except Exception as e:
                 print(f"[QRScanScreen] Error stopping zbarcam: {e}")
-
-            if "camera_container" in self.ids:
+            if "camera_container" in self.ids and self._zbarcam.parent == self.ids.camera_container:
                 try:
-                    self.ids.camera_container.clear_widgets()
+                    self.ids.camera_container.remove_widget(self._zbarcam)
                 except Exception:
                     pass
-
-            self._zbarcam = None
-
+            if destroy_widget:
+                self._zbarcam = None
         self._found = False
         self._decode_in_progress = False
 
@@ -1612,14 +1581,8 @@ class AuthenticatorApp(MDApp):
     _is_desktop = platform not in ('android', 'ios')
 
     def on_resume(self):
-        """Пересоздание камеры после возврата из Android Activity (решает зависание после интентов)."""
-        try:
-            if self.sm.current == "qr_scan":
-                screen = self.sm.current_screen
-                if hasattr(screen, "start_zbarcam") and not getattr(screen, "_camera_failed", False):
-                    Clock.schedule_once(lambda dt: screen.start_zbarcam(), 0.5)
-        except Exception:
-            pass
+        """Не перезапускаем камеру при on_resume на qr_scan — иначе двойной старт даёт Error 2 и цикл Connect/Stop."""
+        pass
 
     def __init__(self, **kwargs):
         super().__init__(**kwargs)
