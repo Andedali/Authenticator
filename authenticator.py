@@ -260,32 +260,28 @@ def _decode_qr_from_path(path):
 
 
 # ── Patch zbarcam to handle pyzbar errors on Android ──
+_zbarcam_patched = False
+
+
 def _patch_zbarcam():
-    """Patch ZBarCam._detect_qrcode_frame to catch pyzbar errors."""
+    """Patch ZBarCam._detect_qrcode_frame to catch pyzbar errors (use module flag, not ._patched on method)."""
+    global _zbarcam_patched
+    if _zbarcam_patched:
+        return
     try:
         from kivy_garden.zbarcam import zbarcam as _zbarcam_mod
-        # Проверяем, не патчили ли уже
-        if hasattr(_zbarcam_mod.ZBarCam._detect_qrcode_frame, '_patched'):
-            return
-        
-        # Сохраняем оригинальный classmethod
-        _orig_detect = _zbarcam_mod.ZBarCam._detect_qrcode_frame
-        # Получаем оригинальную функцию из classmethod
-        _orig_func = _orig_detect.__func__ if hasattr(_orig_detect, '__func__') else _orig_detect
+        _orig = _zbarcam_mod.ZBarCam._detect_qrcode_frame
+        _orig_func = getattr(_orig, "__func__", _orig)
 
         @classmethod
         def _safe_detect_qrcode_frame(cls, texture, code_types):
             try:
-                # Вызываем оригинальный метод правильно (cls как первый аргумент для classmethod)
                 return _orig_func(cls, texture, code_types)
-            except Exception as e:
-                # Перехватываем ошибки pyzbar/ctypes, чтобы приложение не падало
-                # Не логируем каждую ошибку, чтобы не засорять лог
+            except Exception:
                 return []
 
-        # Применяем патч
         _zbarcam_mod.ZBarCam._detect_qrcode_frame = _safe_detect_qrcode_frame
-        _zbarcam_mod.ZBarCam._detect_qrcode_frame._patched = True
+        _zbarcam_patched = True
         print("[Authenticator] ZBarCam patched successfully")
     except Exception as e:
         print(f"[Authenticator] ZBarCam patch failed: {e}")
@@ -316,6 +312,54 @@ def _decode_qr_from_frame(frame_bgr):
     except Exception:
         pass
 
+    return None
+
+
+def _decode_qr_qween(frame_bgr):
+    """
+    Распознавание QR — пайплайн qweenQR. На Android пробуем повороты кадра (камера ROTATION_90).
+    frame_bgr: numpy array BGR. Возвращает строку или None.
+    """
+    import cv2
+    from pyzbar.pyzbar import decode
+
+    def _run_qween(f):
+        """Один проход: qweenQR предобработка + decode(binary), иначе decode(f)."""
+        try:
+            gray = cv2.cvtColor(f, cv2.COLOR_BGR2GRAY)
+            gray = cv2.multiply(gray, 0.6)
+            gray = np.clip(gray, 0, 255).astype(np.uint8)
+            binary = cv2.adaptiveThreshold(
+                gray, 255,
+                cv2.ADAPTIVE_THRESH_GAUSSIAN_C,
+                cv2.THRESH_BINARY,
+                11, 2
+            )
+            kernel = np.ones((3, 3), np.uint8)
+            binary = cv2.morphologyEx(binary, cv2.MORPH_CLOSE, kernel)
+            binary = cv2.morphologyEx(binary, cv2.MORPH_OPEN, kernel)
+            binary = cv2.GaussianBlur(binary, (5, 5), 0)
+            qr_codes = decode(binary)
+            if not qr_codes:
+                qr_codes = decode(f)
+            if qr_codes:
+                return qr_codes[0].data.decode("utf-8", errors="ignore")
+        except Exception:
+            pass
+        return None
+
+    try:
+        # На Android текстура часто перевёрнута (OpenGL) — сначала flip, затем оригинал
+        out = _run_qween(cv2.flip(frame_bgr, 0))
+        if out:
+            return out
+        out = _run_qween(frame_bgr)
+        if out:
+            return out
+    except Exception as e:
+        if not getattr(_decode_qr_qween, "_logged_err", False):
+            _decode_qr_qween._logged_err = True
+            print(f"[Authenticator] _decode_qr_qween error: {e}")
     return None
 
 
@@ -1197,12 +1241,20 @@ class QRScanScreen(MDScreen):
         super().__init__(**kwargs)
         self._zbarcam = None
         self._found = False
+        self._last_qween_time = 0.0
+        self._texture_source = None
+        self._camera_failed = False
+        self._camera_check_clock = None
+        self._poll_clock = None
+        self._decode_log_time = 0.0
+        self._decode_in_progress = False
 
     # =============================
     # SCREEN EVENTS
     # =============================
 
     def on_enter(self):
+        self._camera_failed = False
         if platform == "android":
             def _on_zxing_result(data):
                 if data:
@@ -1248,26 +1300,46 @@ class QRScanScreen(MDScreen):
 
             self._zbarcam = ZBarCam(
                 resolution=[640, 480],
-                code_types=['QRCODE'],  # Только QR коды
+                code_types=['QRCODE'],
             )
-
-            # Отслеживаем изменения symbols
-            self._zbarcam.bind(symbols=self._on_symbols_changed)
 
             self.ids.camera_container.clear_widgets()
             self.ids.camera_container.add_widget(self._zbarcam)
-            
-            # Устанавливаем индекс камеры после добавления виджета
-            # (camera_index устанавливается через xcamera.index в свойстве xcamera)
             self._zbarcam.camera_index = 0
 
-            # Запускаем камеру только если виджет создан успешно
+            # qweenQR по texture: у ZBarCam texture может быть у дочернего xcamera
+            self._texture_source = None
+            for src in (self._zbarcam, getattr(self._zbarcam, "xcamera", None)):
+                if src is None:
+                    continue
+                try:
+                    src.bind(texture=self._on_texture_qween)
+                    self._texture_source = src
+                    break
+                except (KeyError, AttributeError, TypeError) as e:
+                    continue
+            if self._texture_source is None:
+                # запас: распознавание по symbols от ZBarCam
+                self._zbarcam.bind(symbols=self._on_symbols_changed)
+            else:
+                # Опрос по таймеру (реже = меньше лагов, decode в фоне)
+                self._poll_clock = Clock.schedule_interval(self._poll_texture_and_decode, 0.35)
+
             def _start_camera(dt):
                 if self._zbarcam is not None:
                     try:
                         self._zbarcam.start()
+                        if platform == "android":
+                            if self._camera_check_clock:
+                                try:
+                                    self._camera_check_clock.cancel()
+                                except Exception:
+                                    pass
+                            self._camera_check_clock = Clock.schedule_once(self._check_camera_worked, 2.5)
                     except Exception as e:
                         print(f"[QRScanScreen] Error starting camera: {e}")
+                        if platform == "android":
+                            self._show_camera_fallback_ui()
             Clock.schedule_once(_start_camera, 0.3)
 
         except Exception as e:
@@ -1281,8 +1353,67 @@ class QRScanScreen(MDScreen):
             self.ids.camera_container.add_widget(error_label)
             print(f"[QRScanScreen] Error starting zbarcam: {e}")
 
+    def _check_camera_worked(self, dt):
+        """Через 2.5 с проверяем: если кадр так и не пришёл — камера не открылась (Error 2)."""
+        self._camera_check_clock = None
+        if self._found or self._zbarcam is None or self._camera_failed:
+            return
+        xc = getattr(self._zbarcam, "xcamera", self._zbarcam)
+        tex = getattr(xc, "texture", None)
+        if tex is None or getattr(tex, "pixels", None) is None:
+            self._show_camera_fallback_ui()
+
+    def _show_camera_fallback_ui(self):
+        """Камера недоступна — предлагаем выбрать QR из галереи."""
+        self._camera_failed = True
+        self.stop_zbarcam()
+        self.ids.camera_container.clear_widgets()
+        from kivy.uix.boxlayout import BoxLayout as KivyBox
+        box = KivyBox(orientation="vertical", padding=dp(24), spacing=dp(16))
+        box.add_widget(MDLabel(
+            text=t("Camera unavailable", "Камера недоступна") + " (Error 2).\n\n"
+                 + t("Use the button above to pick a QR image from gallery.", "Нажмите кнопку выше, чтобы выбрать изображение с QR из галереи."),
+            halign="center",
+            theme_text_color="Hint",
+            size_hint_y=None,
+            height=dp(100),
+            valign="middle",
+        ))
+        btn = MDRaisedButton(
+            text=t("Pick from gallery", "Выбрать из галереи"),
+            size_hint=(None, None),
+            size=(dp(200), dp(48)),
+            pos_hint={"center_x": 0.5},
+            on_release=lambda x: self.pick_image(),
+        )
+        box.add_widget(btn)
+        self.ids.camera_container.add_widget(box)
+
     def stop_zbarcam(self):
+        if self._camera_check_clock:
+            try:
+                self._camera_check_clock.cancel()
+            except Exception:
+                pass
+            self._camera_check_clock = None
+        if self._poll_clock:
+            try:
+                self._poll_clock.cancel()
+            except Exception:
+                pass
+            self._poll_clock = None
         if self._zbarcam:
+            if self._texture_source is not None:
+                try:
+                    self._texture_source.unbind(texture=self._on_texture_qween)
+                except Exception:
+                    pass
+                self._texture_source = None
+            else:
+                try:
+                    self._zbarcam.unbind(symbols=self._on_symbols_changed)
+                except Exception:
+                    pass
             try:
                 self._zbarcam.stop()
             except Exception as e:
@@ -1297,42 +1428,116 @@ class QRScanScreen(MDScreen):
             self._zbarcam = None
 
         self._found = False
+        self._decode_in_progress = False
 
     # =============================
-    # SYMBOLS HANDLER
+    # QWEENQR / symbols
     # =============================
 
     def _on_symbols_changed(self, instance, symbols):
-        """Вызывается когда ZBarCam находит QR коды."""
+        """Запас: когда texture недоступен, используем symbols от ZBarCam."""
         try:
             if self._found or not symbols:
                 return
-
-            print(f"[QRScanScreen] ZBarCam found {len(symbols)} symbol(s)")
-            
-            # Берём первый найденный QR код
             for symbol in symbols:
                 if symbol.data:
-                    try:
-                        data = symbol.data.decode('utf-8') if isinstance(symbol.data, bytes) else str(symbol.data)
-                        if data and data.strip():
-                            print(f"[QRScanScreen] ZBarCam decoded QR: {data[:50]}...")
-                            # Показываем toast для отладки
-                            toast(t(f"QR found: {data[:30]}...", f"QR найден: {data[:30]}..."), duration=1.5)
-                            self._found = True
-                            Clock.schedule_once(
-                                lambda dt, d=data: self._on_qr_found(d),
-                                0,
-                            )
-                            return
-                    except Exception as e:
-                        print(f"[QRScanScreen] Error decoding symbol data: {e}")
-                        pass
+                    data = symbol.data.decode("utf-8") if isinstance(symbol.data, bytes) else str(symbol.data)
+                    if data and data.strip():
+                        self._found = True
+                        toast(t("QR found", "QR найден"), duration=1.0)
+                        Clock.schedule_once(lambda dt, d=data: self._on_qr_found(d), 0)
+                        return
         except Exception as e:
-            # Перехватываем ошибки от pyzbar (ctypes.ArgumentError и т.д.)
-            # чтобы приложение не падало
-            print(f"[QRScanScreen] Error in _on_symbols_changed: {e}")
-            # Не показываем ошибку пользователю - просто игнорируем этот кадр
+            print(f"[QRScanScreen] _on_symbols_changed: {e}")
+
+    def _poll_texture_and_decode(self, dt):
+        """Быстро копируем кадр и отправляем на декод в фоне — UI не блокируется."""
+        if self._found or self._zbarcam is None or self._decode_in_progress:
+            return
+        xc = getattr(self._zbarcam, "xcamera", None)
+        src = xc if xc is not None else self._zbarcam
+        tex = getattr(src, "texture", None)
+        if tex is None or tex.pixels is None:
+            return
+        w, h = tex.size
+        if w <= 0 or h <= 0:
+            return
+        try:
+            pixels = tex.pixels.tobytes() if hasattr(tex.pixels, "tobytes") else bytes(tex.pixels)
+        except Exception:
+            return
+        n = len(pixels)
+        if n < w * h * 3:
+            return
+        self._decode_in_progress = True
+        def _decode_in_thread():
+            try:
+                import cv2
+                frame_bgr = None
+                if n >= w * h * 4:
+                    frame = np.frombuffer(pixels, dtype=np.uint8)[: w * h * 4].reshape(h, w, 4)
+                    frame_bgr = cv2.cvtColor(frame, cv2.COLOR_RGBA2BGR)
+                else:
+                    frame = np.frombuffer(pixels, dtype=np.uint8)[: w * h * 3].reshape(h, w, 3)
+                    frame_bgr = cv2.cvtColor(frame, cv2.COLOR_RGB2BGR)
+                data = _decode_qr_qween(frame_bgr)
+                if data and data.strip():
+                    Clock.schedule_once(lambda dt, d=data: self._on_qr_found_from_background(d), 0)
+            except Exception as e:
+                print(f"[QRScanScreen] decode thread error: {e}")
+            finally:
+                self._decode_in_progress = False
+        threading.Thread(target=_decode_in_thread, daemon=True).start()
+
+    def _on_qr_found_from_background(self, data):
+        """Вызов с фонового потока — переходим в UI и показываем результат."""
+        self._found = True
+        toast(t("QR found", "QR найден"), duration=1.0)
+        self._on_qr_found(data)
+
+    def _process_texture_to_qr(self, texture):
+        """Вызов при bind(texture) — тоже в фоне, чтобы не лагало."""
+        if self._found or texture is None or self._decode_in_progress:
+            return
+        now = time.time()
+        if now - self._last_qween_time < 0.25:
+            return
+        self._last_qween_time = now
+        try:
+            pixels = texture.pixels
+            if pixels is None:
+                return
+            w, h = texture.size
+            if w <= 0 or h <= 0:
+                return
+            pixels = pixels.tobytes() if hasattr(pixels, "tobytes") else bytes(pixels)
+            n = len(pixels)
+            if n < w * h * 3:
+                return
+            self._decode_in_progress = True
+            def _decode_in_thread():
+                try:
+                    import cv2
+                    frame_bgr = None
+                    if n >= w * h * 4:
+                        frame = np.frombuffer(pixels, dtype=np.uint8)[: w * h * 4].reshape(h, w, 4)
+                        frame_bgr = cv2.cvtColor(frame, cv2.COLOR_RGBA2BGR)
+                    else:
+                        frame = np.frombuffer(pixels, dtype=np.uint8)[: w * h * 3].reshape(h, w, 3)
+                        frame_bgr = cv2.cvtColor(frame, cv2.COLOR_RGB2BGR)
+                    data = _decode_qr_qween(frame_bgr)
+                    if data and data.strip():
+                        Clock.schedule_once(lambda dt, d=data: self._on_qr_found_from_background(d), 0)
+                except Exception:
+                    pass
+                finally:
+                    self._decode_in_progress = False
+            threading.Thread(target=_decode_in_thread, daemon=True).start()
+        except Exception as e:
+            print(f"[QRScanScreen] qweenQR frame error: {e}")
+
+    def _on_texture_qween(self, instance, texture):
+        self._process_texture_to_qr(texture)
 
     # =============================
     # RESULT
@@ -1411,7 +1616,7 @@ class AuthenticatorApp(MDApp):
         try:
             if self.sm.current == "qr_scan":
                 screen = self.sm.current_screen
-                if hasattr(screen, "start_zbarcam"):
+                if hasattr(screen, "start_zbarcam") and not getattr(screen, "_camera_failed", False):
                     Clock.schedule_once(lambda dt: screen.start_zbarcam(), 0.5)
         except Exception:
             pass
