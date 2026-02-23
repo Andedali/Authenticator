@@ -1211,6 +1211,8 @@ class QRScanScreen(MDScreen):
         self._poll_clock = None
         self._decode_log_time = 0.0
         self._decode_in_progress = False
+        # Игнорировать распознавание до этого времени (чтобы не считать старый кадр при повторном открытии камеры)
+        self._decode_after_time = 0.0
 
     # =============================
     # SCREEN EVENTS
@@ -1314,6 +1316,8 @@ class QRScanScreen(MDScreen):
                 return
             try:
                 self._zbarcam.start()
+                # Первую секунду не распознаём — иначе старый кадр при повторном открытии камеры даёт ложное срабатывание
+                self._decode_after_time = time.time() + 1.0
                 if platform == "android":
                     self._camera_check_clock = Clock.schedule_once(self._check_camera_worked, 2.5)
             except Exception as e:
@@ -1408,6 +1412,8 @@ class QRScanScreen(MDScreen):
         try:
             if self._found or not symbols:
                 return
+            if time.time() < self._decode_after_time:
+                return
             for symbol in symbols:
                 if symbol.data:
                     data = symbol.data.decode("utf-8") if isinstance(symbol.data, bytes) else str(symbol.data)
@@ -1422,6 +1428,8 @@ class QRScanScreen(MDScreen):
     def _poll_texture_and_decode(self, dt):
         """Быстро копируем кадр и отправляем на декод в фоне — UI не блокируется."""
         if self._found or self._zbarcam is None or self._decode_in_progress:
+            return
+        if time.time() < self._decode_after_time:
             return
         xc = getattr(self._zbarcam, "xcamera", None)
         src = xc if xc is not None else self._zbarcam
@@ -1469,6 +1477,8 @@ class QRScanScreen(MDScreen):
         if self._found or texture is None or self._decode_in_progress:
             return
         now = time.time()
+        if now < self._decode_after_time:
+            return
         if now - self._last_qween_time < 0.25:
             return
         self._last_qween_time = now
